@@ -933,14 +933,45 @@ int main(void)
           "scheduled-projectile script cursor did not advance");
     CHECK(fnv1a(machine->memory + 0x2dff0, 0x50) == UINT32_C(0x0870b440),
           "scheduled enemy projectile record differs from oracle");
-    result = bs_recomp_run(machine, 1000000);
-    CHECK(result == BS_RECOMP_UNTRANSLATED && machine->cpu.pc == 0xd16 &&
-          machine->translated_steps == 221419 &&
+    /* The recorded combat run still reaches the demo-exit edge at exactly the
+     * same step, which pins every translation it passes through. */
+    result = bs_recomp_run(machine, 221418 - 8309);
+    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0xd16 &&
+          machine->translated_steps == 221418 &&
           bs_recomp_read16(machine, 0x1078) == 0x1f40,
-          "full recorded combat run did not reach the demo-exit frontier");
+          "full recorded combat run did not reach the demo-exit edge");
     fprintf(stderr,
-            "recorded combat: 8000 frames, 221419 translated steps, "
-            "frontier=$%06x\n", machine->cpu.pc);
+            "recorded combat: 8000 frames, 221418 translated steps, "
+            "demo-exit edge=$%06x\n", machine->cpu.pc);
+
+    /* $D16 with both fire buttons released and the demo counter at its $0FA0
+     * expiry takes the $D3C fade back into the title sequence at LAB_58A. */
+    CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) != 0 &&
+          bs_recomp_read16(machine, machine->cpu.a[5] - 28550) == 0x0fa0 &&
+          machine->ciaa[0] == 0xff,
+          "demo-exit edge was not reached in the expired-demo state");
+    result = bs_recomp_run(machine, 1);
+    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0x58a &&
+          machine->translated_steps == 221419 &&
+          bs_recomp_read32(machine, machine->cpu.a[5] + 13182) == 0xfffffffe &&
+          machine->cpu.a[1] == 0xb2a0 &&
+          (machine->cpu.sr & 0x1f) == 0x10,
+          "expired demo did not take the $D3C title-restart path");
+    /* The fade leaves every copper colour entry black. */
+    int faded = 1;
+    for (unsigned entry = 0; entry < 32; entry++)
+        faded &= (bs_recomp_read16(machine, 0xb2a0 + entry * 4) & 0x0fff) == 0;
+    CHECK(faded, "demo-exit fade did not darken the palette to black");
+
+    /* With the demo exit closed, the attract cycle runs title -> demo ->
+     * title without reaching an untranslated edge. */
+    result = bs_recomp_run(machine, 400000);
+    CHECK(result == BS_RECOMP_OK,
+          "attract cycle reached an untranslated edge after the demo exit");
+    CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) != 0,
+          "attract cycle did not return to demo mode");
+    fprintf(stderr, "attract cycle: %ld steps, no untranslated edge\n",
+            (long)machine->translated_steps);
     uint32_t translated_pc = machine->cpu.pc;
     machine->cpu.pc = 0x00dead;
     result = bs_recomp_run(machine, 1);

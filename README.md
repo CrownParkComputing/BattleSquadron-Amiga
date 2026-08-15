@@ -47,9 +47,20 @@ finished recompilation: it still executes game code through Musashi.
 The separate recompilation path never links Musashi. It includes the loader's
 `$AB46` BOND decompressor, complete overlay descriptor/load path, and a direct
 native translation from boot through a complete 8,000-frame recorded combat
-run. It reaches the demo-exit boundary at loader PC `$D16` after 221,419
-fail-closed dispatch steps and 12 real overlay loads. No unknown PC or object
-or projectile type is silently interpreted.
+run. That run reaches the demo-exit edge at loader PC `$D16` after 221,418
+fail-closed dispatch steps. The demo exit is now translated, so execution
+continues past it: the expired demo fades its palette at `$D3C` and restarts
+the title sequence at `$58A`, and the attract cycle then runs title -> demo
+without reaching an untranslated edge, through 621,419 steps and 16 real
+overlay loads. No unknown PC or object or projectile type is silently
+interpreted.
+
+Both `$D16` fire-button reads alias to CIA-A port A, whose inputs are active
+low. That register is now initialised to its idle high state; leaving it
+zeroed read as both buttons permanently held, which skipped the demo
+continuation branch entirely. Ten separate checks catch a regression of it.
+The remaining `$D16` edges are LAB_D52's fire-to-start, which needs the `$926`
+new-game entry translated as dispatch cases, and LAB_D98's game-over paths.
 
 The translated path now covers music-driver state initialisation, both palette
 algorithms, the six-page text intro/font compositor, title keyboard-help
@@ -137,7 +148,7 @@ title-neutral trace/playback and Copper-palette contracts.
 This is not yet a complete playable recompilation claim. The recorded combat
 run and live-input preview work without an interpreter fallback, and exact
 intro PCM is connected. The full LODMUS/LODGAM timer-driven music and SFX
-sequencers plus the `$D16` demo-exit/title transition still have to be
+sequencers still have to be
 translated.
 Projectile/object types not reached by the current 8,000-frame run remain
 fail-closed. The recompilation tests enforce a link audit with no Musashi or

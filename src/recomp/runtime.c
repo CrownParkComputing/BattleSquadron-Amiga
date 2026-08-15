@@ -135,6 +135,9 @@ int bs_recomp_init(BsRecomp *machine, const char *data_directory)
     machine->cpu.a[0] = 0x80;
     machine->cpu.a[1] = 0x150;
     machine->cpu.a[7] = 0x10000;
+    /* CIA-A port A idles high.  Its fire-button inputs are active low, so a
+     * zeroed register would read as both buttons permanently held. */
+    machine->ciaa[0] = 0xff;
     return BS_RECOMP_OK;
 }
 
@@ -5782,14 +5785,30 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
             machine->cpu.pc = 0xd16;
             break;
         case 0xd16:
-            /* Demo mode continues until its $0FA0-frame expiry. */
+            /* $D16-$D4E.  In demo mode either fire button starts a game via
+             * LAB_D52; otherwise the demo runs to its $0FA0-frame expiry and
+             * fades back to the title at LAB_58A.  Both button reads alias to
+             * CIA-A port A, whose inputs are active low. */
             if (bs_recomp_read8(machine, machine->cpu.a[5] - 28516) != 0 &&
+                (bs_recomp_read8(machine, 0xbfe003) & 0x80) != 0 &&
+                (bs_recomp_read8(machine, 0xbfe001) & 0x40) != 0 &&
                 (int16_t)bs_recomp_read16(machine,
                                            machine->cpu.a[5] - 28550) <
                     0x0fa0) {
                 machine->cpu.sr =
                     (uint16_t)((machine->cpu.sr & 0xffe0) | 0x19);
                 machine->cpu.pc = 0xaa0;
+            } else if (bs_recomp_read8(machine,
+                                        machine->cpu.a[5] - 28516) != 0 &&
+                       (bs_recomp_read8(machine, 0xbfe003) & 0x80) != 0 &&
+                       (bs_recomp_read8(machine, 0xbfe001) & 0x40) != 0) {
+                /* $D3C-$D4E: the expired demo darkens its palette and
+                 * restarts the title sequence at LAB_58A. */
+                bs_recomp_write32(machine, machine->cpu.a[5] + 13182,
+                                  0xfffffffe);
+                machine->cpu.a[1] = 0xb2a0;
+                darken_palette(machine);
+                machine->cpu.pc = 0x58a;
             } else if (bs_recomp_read8(machine,
                                         machine->cpu.a[5] - 28516) == 0 &&
                        bs_recomp_read8(machine,
@@ -5801,6 +5820,8 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
                     (uint16_t)((machine->cpu.sr & 0xffe0) | 0x04);
                 machine->cpu.pc = 0xaa0;
             } else {
+                /* Remaining edges are LAB_D52's fire-to-start, which needs
+                 * the $926 new-game entry, and LAB_D98's game-over paths. */
                 snprintf(machine->error, sizeof machine->error,
                          "untranslated demo-exit path at $000d16");
                 return BS_RECOMP_UNTRANSLATED;
