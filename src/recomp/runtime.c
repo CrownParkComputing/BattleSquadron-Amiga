@@ -541,6 +541,27 @@ static void disable_speech_entrypoints(BsRecomp *machine)
     }
 }
 
+/* Loader $2B32 on its own: copy an animation template into an object and
+ * leave its script cursor just past the template. */
+static void apply_animation_template(BsRecomp *machine, uint32_t object,
+                                     uint32_t source)
+{
+    bs_recomp_write16(machine, object + 28, bs_recomp_read16(machine, source));
+    bs_recomp_write16(machine, object + 58,
+                      bs_recomp_read16(machine, source + 2));
+    bs_recomp_write32(machine, object + 30,
+                      bs_recomp_read32(machine, source + 4));
+    bs_recomp_write32(machine, object + 12,
+                      bs_recomp_read32(machine, source + 8));
+    bs_recomp_write32(machine, object + 16,
+                      bs_recomp_read32(machine, source + 12));
+    bs_recomp_write32(machine, object + 20,
+                      bs_recomp_read32(machine, source + 16));
+    bs_recomp_write32(machine, object + 62,
+                      bs_recomp_read32(machine, source + 20));
+    bs_recomp_write32(machine, object + 24, source + 24);
+}
+
 /* Loader $1288 via $3722/$2B32: initialise one 266-byte player object from
  * its animation template, then clear the trailing runtime workspace. */
 static void initialise_player_object(BsRecomp *machine)
@@ -556,14 +577,7 @@ static void initialise_player_object(BsRecomp *machine)
     machine->cpu.a[1] = bs_recomp_read32(machine, machine->cpu.a[2]);
     uint32_t source = machine->cpu.a[1];
     uint32_t object = machine->cpu.a[4];
-    bs_recomp_write16(machine, object + 28, bs_recomp_read16(machine, source));
-    bs_recomp_write16(machine, object + 58, bs_recomp_read16(machine, source + 2));
-    bs_recomp_write32(machine, object + 30, bs_recomp_read32(machine, source + 4));
-    bs_recomp_write32(machine, object + 12, bs_recomp_read32(machine, source + 8));
-    bs_recomp_write32(machine, object + 16, bs_recomp_read32(machine, source + 12));
-    bs_recomp_write32(machine, object + 20, bs_recomp_read32(machine, source + 16));
-    bs_recomp_write32(machine, object + 62, bs_recomp_read32(machine, source + 20));
-    bs_recomp_write32(machine, object + 24, source + 24);
+    apply_animation_template(machine, object, source);
 
     static const uint8_t byte_fields[] = {90, 91, 97, 41, 100, 49, 57, 44, 96};
     for (size_t i = 0; i < sizeof byte_fields; i++)
@@ -3230,6 +3244,105 @@ static void append_sprite_record(BsRecomp *machine)
     machine->cpu.sr &= 0xfff0;
 }
 
+/* $5234-$5372, which runs in front of the LAB_5374 record builder below.
+ * While the death timer at +49 is non-zero it steps the explosion animation;
+ * on the frame it reaches zero the ship either respawns or the player is out
+ * of lives.  Without this the timer never counted down, so a hit ship stayed
+ * dead for the rest of the game. */
+static int update_dying_ship(BsRecomp *machine, uint32_t player,
+                             int *done)
+{
+    uint8_t timer = bs_recomp_read8(machine, player + 49);
+    if (timer == 0) return BS_RECOMP_OK;
+
+    bs_recomp_write16(machine, player + 8, 0x003c);
+    /* MOVEQ #70 then SUB.B, so this is a byte count of elapsed frames. */
+    uint16_t elapsed = (uint8_t)(70 - timer);
+    uint16_t frame = (uint16_t)(elapsed / 7);
+    uint32_t bitmap = (uint32_t)frame * 0x01e0 + UINT32_C(0x00013190);
+
+    uint16_t plane = bs_recomp_read16(machine, player + 50);
+    bs_recomp_write16(machine, player + 10, plane);
+    uint32_t pointers = 0xc6b6 + (uint16_t)(plane << 2);
+    bs_recomp_write32(machine, pointers, bitmap);
+    bs_recomp_write32(machine, pointers + 4, bitmap + 0xf0);
+
+    uint32_t shape = 0x5192 + (uint16_t)(frame * 6);
+    uint32_t record = bs_recomp_read32(machine, player + 102);
+    bs_recomp_write16(machine, record, bs_recomp_read16(machine, shape));
+    bs_recomp_write16(machine, record + 4,
+                      bs_recomp_read16(machine, shape + 2));
+    bs_recomp_write16(machine, record + 8,
+                      bs_recomp_read16(machine, shape + 4));
+
+    timer--;
+    bs_recomp_write8(machine, player + 49, timer);
+    if (timer != 0) return BS_RECOMP_OK;
+
+    bs_recomp_write16(machine, player + 8, 0x001e);
+    bs_recomp_write16(machine, player + 68, 0x012c);
+    bs_recomp_write16(machine, player + 70, 0x012c);
+    bs_recomp_write16(machine, player + 72, 0);
+    bs_recomp_write32(machine, player + 76,
+                      bs_recomp_read32(machine, player + 84));
+
+    if (bs_recomp_read8(machine, player + 56) == 0) {
+        /* $52BA-$5304: out of lives.  The ship is parked off-screen in its
+         * game-over state, a high-score comparison decides whether the run is
+         * flagged, and the routine tail-jumps to the $24726 entry, which asks
+         * the driver for track three.  That tail jump also skips the record
+         * builder for this frame. */
+        const uint32_t base = machine->cpu.a[5];
+        bs_recomp_write8(machine, player + 38, 0xc8);
+        bs_recomp_write16(machine, player + 42, 0);
+        bs_recomp_write32(machine, player + 34, 0x4141415d);
+        bs_recomp_write8(machine, player + 40, 0);
+        bs_recomp_write16(machine, player, 0x03e7);
+        bs_recomp_write16(machine, player + 2, 0x03e7);
+        bs_recomp_write16(machine, player + 120, 0x02ee);
+        uint32_t score = bs_recomp_read32(machine, player + 106);
+        uint32_t best = bs_recomp_read32(machine, base + 32246);
+        int flagged = 0;
+        if (score < best) {
+            flagged = 1;
+        } else if (score == best) {
+            flagged = bs_recomp_read32(machine, player + 110) <
+                      bs_recomp_read32(machine, base + 32250);
+        }
+        if (flagged) {
+            bs_recomp_write8(machine, player + 100, 0xff);
+            bs_recomp_write16(machine, player + 120, 0x007d);
+        }
+        select_music(machine, 3);
+        *done = 1;
+        return BS_RECOMP_OK;
+    }
+
+    /* LAB_530A: respawn with the countdown the frame loop consumes. */
+    bs_recomp_write8(machine, player + 48, 0x91);
+    bs_recomp_write16(machine, player + 66, 3);
+    bs_recomp_write16(machine, player + 68, 0x0080);
+    bs_recomp_write16(machine, player + 70, 0x0080);
+    bs_recomp_write16(machine, player + 72, 0);
+    bs_recomp_write32(machine, player + 76,
+                      bs_recomp_read32(machine, player + 80));
+    bs_recomp_write8(machine, player + 38, 0x96);
+    bs_recomp_write16(machine, player, bs_recomp_read16(machine, player + 54));
+    bs_recomp_write16(machine, player + 2, 0x0200);
+    bs_recomp_write16(machine, player + 10, 6);
+    bs_recomp_write16(machine, player + 52, 0x012c);
+
+    /* $534A-$5372: halve the weapon level and reload the matching template. */
+    uint16_t level = (uint16_t)(bs_recomp_read16(machine, player + 60) >> 1);
+    bs_recomp_write16(machine, player + 60, level);
+    uint32_t entry = 0x2024 + (uint16_t)(level << 2) +
+                     (uint16_t)(bs_recomp_read16(machine, player + 58) * 0x18);
+    apply_animation_template(machine, player,
+                             bs_recomp_read32(machine, entry));
+    machine->cpu.a[4] = player;
+    return BS_RECOMP_OK;
+}
+
 static int build_respawning_ship_records(BsRecomp *machine,
                                          uint32_t player,
                                          uint32_t first_list,
@@ -3239,6 +3352,10 @@ static int build_respawning_ship_records(BsRecomp *machine,
     machine->cpu.a[2] = second_list;
     machine->cpu.a[3] = player;
     set_dreg_word(&machine->cpu.d[3], bs_recomp_read16(machine, player + 2));
+    int dying_done = 0;
+    int dying = update_dying_ship(machine, player, &dying_done);
+    if (dying != BS_RECOMP_OK) return dying;
+    if (dying_done) return BS_RECOMP_OK;
     machine->cpu.a[0] = player + 122;
     uint16_t display_offset =
         bs_recomp_read16(machine, machine->cpu.a[5] - 11824);
