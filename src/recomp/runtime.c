@@ -1937,6 +1937,18 @@ static void draw_projectile_cookie_cut(BsRecomp *machine,
     }
 }
 
+/* LAB_98E6: arm a record's explosion.  The original falls straight into the
+ * $7A42 countdown afterwards, so callers jump there rather than returning. */
+static void start_projectile_explosion(BsRecomp *machine, uint32_t projectile)
+{
+    bs_recomp_write8(machine, projectile + 29, 8);
+    bs_recomp_write8(machine, projectile + 30,
+        (uint8_t)((bs_recomp_read8(machine, projectile + 30) & ~0x20) | 0x80));
+    bs_recomp_write32(machine, projectile + 36, 0x00011090);
+    bs_recomp_write32(machine, projectile + 32, 0x00011310);
+    bs_recomp_write16(machine, projectile + 50, 0x0020);
+}
+
 static int update_enemy_projectile_pool(BsRecomp *machine)
 {
     const uint32_t base = machine->cpu.a[5];
@@ -1966,10 +1978,11 @@ reprocess_projectile:
                  * record is freed when it reaches zero.  Without this the
                  * counter stayed where the hit left it, so a hit ship kept
                  * its first explosion frame and never went away. */
-                uint8_t exploding = bs_recomp_read8(machine, projectile + 29);
-                if (exploding != 0) {
+                if (bs_recomp_read8(machine, projectile + 29) != 0) {
+explosion_countdown:
                     if (!(bs_recomp_read8(machine, base - 28551) & 2)) {
-                        uint8_t countdown = (uint8_t)(exploding - 1);
+                        uint8_t countdown = (uint8_t)(
+                            bs_recomp_read8(machine, projectile + 29) - 1);
                         bs_recomp_write8(machine, projectile + 29, countdown);
                         if (countdown != 0) {
                             bs_recomp_write32(machine, projectile + 36,
@@ -2225,8 +2238,8 @@ reprocess_projectile:
                         bs_recomp_write8(machine, projectile + 24,
                                          (uint8_t)armour);
                         if (armour < 0) {
-                            bs_recomp_write16(machine, projectile, 0);
-                            goto next_projectile;
+                            start_projectile_explosion(machine, projectile);
+                            goto explosion_countdown;
                         }
                         bs_recomp_write8(machine, projectile + 57, 6);
                     }
@@ -2702,8 +2715,8 @@ reprocess_projectile:
                         bs_recomp_write8(machine, projectile + 24,
                                          (uint8_t)armour);
                         if (armour < 0) {
-                            bs_recomp_write16(machine, projectile, 0);
-                            goto next_projectile;
+                            start_projectile_explosion(machine, projectile);
+                            goto explosion_countdown;
                         }
                         bs_recomp_write8(machine, projectile + 57, 8);
                     }
@@ -2835,8 +2848,8 @@ reprocess_projectile:
                         bs_recomp_write8(machine, projectile + 24,
                                          (uint8_t)armour);
                         if (armour < 0) {
-                            bs_recomp_write16(machine, projectile, 0);
-                            goto next_projectile;
+                            start_projectile_explosion(machine, projectile);
+                            goto explosion_countdown;
                         }
                         bs_recomp_write8(machine, projectile + 57, 8);
                     }
