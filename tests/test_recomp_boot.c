@@ -175,22 +175,8 @@ static int collision_pass_test(void)
 
     bs_recomp_write16(fixture, player + 62, 4);
     bs_recomp_write16(fixture, player + 64, 4);
-    bs_recomp_write16(fixture, shot, 0x0128);
-    bs_recomp_write16(fixture, shot + 2, 0x0140);
-    bs_recomp_write8(fixture, shot + 11, 2);
-    bs_recomp_write16(fixture, projectile, 0x0120);
-    bs_recomp_write16(fixture, projectile + 16, 0x0120);
-    bs_recomp_write16(fixture, projectile + 18, 0x0140);
-    bs_recomp_write16(fixture, projectile + 20, 0x0130);
-    bs_recomp_write16(fixture, projectile + 22, 0x0150);
-    if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK ||
-        fixture->cpu.pc != 0xc50 ||
-        bs_recomp_read16(fixture, shot) != 0 ||
-        bs_recomp_read8(fixture, projectile + 62) != 2) {
-        free(fixture);
-        return 0;
-    }
-
+    /* $C4C is LAB_34FA, the pass against the enemy/scenery records.  A
+     * penetrating shot (negative damage byte) survives its own hit. */
     bs_recomp_write16(fixture, shot, 0x0128);
     bs_recomp_write16(fixture, shot + 2, 0x0140);
     bs_recomp_write8(fixture, shot + 11, 0xff);
@@ -200,9 +186,27 @@ static int collision_pass_test(void)
     bs_recomp_write16(fixture, entity + 52, 0x0130);
     bs_recomp_write16(fixture, entity + 54, 0x0150);
     if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK ||
-        fixture->cpu.pc != 0xc54 ||
+        fixture->cpu.pc != 0xc50 ||
         bs_recomp_read16(fixture, shot) != 0x0128 ||
         bs_recomp_read8(fixture, entity + 24) != 2) {
+        free(fixture);
+        return 0;
+    }
+
+    /* $C50 is LAB_3424, the pass against the hostile/collectable records.  An
+     * ordinary shot is consumed by its hit. */
+    bs_recomp_write16(fixture, shot, 0x0128);
+    bs_recomp_write16(fixture, shot + 2, 0x0140);
+    bs_recomp_write8(fixture, shot + 11, 2);
+    bs_recomp_write16(fixture, projectile, 0x0120);
+    bs_recomp_write16(fixture, projectile + 16, 0x0120);
+    bs_recomp_write16(fixture, projectile + 18, 0x0140);
+    bs_recomp_write16(fixture, projectile + 20, 0x0130);
+    bs_recomp_write16(fixture, projectile + 22, 0x0150);
+    if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK ||
+        fixture->cpu.pc != 0xc54 ||
+        bs_recomp_read16(fixture, shot) != 0 ||
+        bs_recomp_read8(fixture, projectile + 62) != 2) {
         free(fixture);
         return 0;
     }
@@ -1022,7 +1026,7 @@ int main(void)
      * the next thing to translate. */
     result = bs_recomp_run(machine, 1000000);
     CHECK(result == BS_RECOMP_UNTRANSLATED && machine->cpu.pc == 0xcb2 &&
-          machine->translated_steps == 53025,
+          machine->translated_steps == 53675,
           "recorded demo did not stop at the game-over record path");
     CHECK(bs_recomp_read8(machine, 0x4e3c + 38) >= 0xc8,
           "recorded demo stopped without the player reaching game over");

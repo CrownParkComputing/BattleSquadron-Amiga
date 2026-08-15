@@ -6036,11 +6036,15 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
             machine->cpu.pc = 0xc4c;
             break;
         case 0xc4c:
-            collide_player_shots_with_projectiles(machine);
+            /* $C4C calls LAB_34FA and $C50 calls LAB_3424, in that order.
+             * The order is load-bearing: a non-penetrating shot is consumed
+             * by whichever pass reaches it first, so running the projectile
+             * pass first spends shots that should have hit an enemy record. */
+            collide_player_shots_with_entities(machine);
             machine->cpu.pc = 0xc50;
             break;
         case 0xc50:
-            collide_player_shots_with_entities(machine);
+            collide_player_shots_with_projectiles(machine);
             machine->cpu.pc = 0xc54;
             break;
         case 0xc54:
