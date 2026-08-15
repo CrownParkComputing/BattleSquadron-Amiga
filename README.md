@@ -77,6 +77,31 @@ register effects rather than an audible stop.
 
 The remaining `$D16` edges are LAB_D98's game-over paths.
 
+Host fire buttons now reach the game. `$9AC6`/`$9AE6` read player one's fire
+from CIA-A port A bit 7 and player two's from bit 6, both active low, and
+`bs_recomp_set_input` drives those bits as well as the per-player direction
+mask. Without that a frontend button press could never satisfy the `$D16`
+fire-to-start read.
+
+`$A56`/`$A5C` are translated, so the new-game sequence brings up LODGAM's
+audio system instead of deferring it: four channels seeded from the `$25504`
+descriptor table with their volumes silenced, CIA-B timer A armed at LODGAM's
+`$31` period with its interrupt enabled, the `$24F34` handler vector
+installed, and all four audio DMA channels enabled. The conditional `$24708`
+and `$24702` calls at `$A76`/`$A82` are translated with them. A silencing
+`DMACON` write that the original does not perform at `$A88` has been removed
+now that the real initialisation runs; the channels are silent because their
+volumes are zero, which is the game's own state.
+
+Four overlays share the `$246F0` load address and three share `$3D800`, so a
+call through an overlay jump table is not one routine. Both translated
+overlay calls select on the resident vector and fail closed on an unknown one.
+
+What is still missing for audio is the sequencer itself: nothing dispatches
+the CIA-B timer interrupt, so the `$24F34` handler never runs, the channel
+volumes stay at zero and Paula stays silent. That handler and its `$24856`
+per-channel update are the next audio milestone.
+
 The translated path now covers music-driver state initialisation, both palette
 algorithms, the six-page text intro/font compositor, title keyboard-help
 rendering, object relocation, work-RAM clearing, game-mode/player

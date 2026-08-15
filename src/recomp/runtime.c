@@ -879,6 +879,112 @@ static int scroll_frame(BsRecomp *machine)
  * It is reached from the title's $842 setup edge and from LAB_D52 when a fire
  * button starts a game out of the attract demo, so the overlay installation
  * that precedes it belongs to each caller rather than here. */
+/* LODGAM $247C8.  The same channel-state shape as the LODMUS init, with its
+ * own descriptor table and two flag bytes the music driver does not set. */
+static void init_gameplay_channel(BsRecomp *machine, uint32_t state)
+{
+    static const uint8_t clear_bytes[] = {
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x39,
+        0x35, 0x37, 0x36, 0x3b, 0x3c,
+    };
+    for (size_t i = 0; i < sizeof clear_bytes; i++)
+        bs_recomp_write8(machine, state + clear_bytes[i], 0);
+    bs_recomp_write8(machine, state + 0x3a, 1);
+    bs_recomp_write8(machine, state + 0x3d, 0);
+    bs_recomp_write16(machine, state + 0x28, 0);
+    bs_recomp_write16(machine, state + 0x2a, 0);
+    bs_recomp_write16(machine, state + 0x2c, 0);
+    bs_recomp_write32(machine, state + 0x14, 0);
+    bs_recomp_write32(machine, state + 0x18, 0);
+    bs_recomp_write32(machine, state + 0x1c, 0);
+
+    bs_recomp_write32(machine, state + 4, 0x25504);
+    uint32_t source = bs_recomp_read32(machine, 0x25504);
+    /* State +0 is the channel's Paula register base, so this seeds AUDxLC and
+     * AUDxLEN and silences AUDxVOL. */
+    uint32_t paula = bs_recomp_read32(machine, state);
+    bs_recomp_write32(machine, paula, bs_recomp_read32(machine, source));
+    bs_recomp_write16(machine, paula + 4,
+                      bs_recomp_read16(machine, source + 4));
+    bs_recomp_write16(machine, paula + 8, 0);
+
+    uint32_t sequence = bs_recomp_read32(machine, state + 8);
+    bs_recomp_write32(machine, state + 0x0c, sequence);
+    bs_recomp_write32(machine, state + 0x10,
+                      bs_recomp_read32(machine, sequence));
+    bs_recomp_write16(machine, state + 0x20,
+                      bs_recomp_read16(machine, sequence + 6));
+    machine->cpu.d[0] = (machine->cpu.d[0] & 0xffff0000) |
+        (uint16_t)(bs_recomp_read16(machine, sequence + 0x0a) - 1);
+    bs_recomp_write16(machine, state + 0x22, (uint16_t)machine->cpu.d[0]);
+}
+
+static const uint32_t bs_gameplay_channels[4] = {
+    0x252a4, 0x252e2, 0x25320, 0x2535e,
+};
+
+/* LODGAM $24C6E via the $246F0 table entry.  Four overlays share that load
+ * address, so the resident jump decides whether this is the audio system at
+ * all.  It arms the CIA-B timer A interrupt that clocks the sequencer and
+ * enables all four audio DMA channels. */
+static int gameplay_audio_init(BsRecomp *machine)
+{
+    if (bs_recomp_read16(machine, 0x246f0) != 0x4ef9 ||
+        bs_recomp_read32(machine, 0x246f2) != 0x00024c6e) {
+        snprintf(machine->error, sizeof machine->error,
+                 "the resident $246F0 entry is not LODGAM's AudioSystemInit");
+        return BS_RECOMP_UNTRANSLATED;
+    }
+    for (size_t i = 0; i < 4; i++)
+        init_gameplay_channel(machine, bs_gameplay_channels[i]);
+    bs_recomp_write16(machine, 0xdff09a, 0x4000);
+    bs_recomp_write8(machine, 0xbfde00, 0x00);
+    bs_recomp_write8(machine, 0xbfd400, 0x00);
+    bs_recomp_write8(machine, 0xbfd500, 0x31);
+    bs_recomp_write8(machine, 0xbfdd00, 0x81);
+    bs_recomp_write8(machine, 0xbfde00, 0x11);
+    bs_recomp_write32(machine, 0x000008, 0x24f34);
+    bs_recomp_write16(machine, 0xdff09a, 0xc000);
+    bs_recomp_write16(machine, 0xdff096, 0x800f);
+    /* The closing MOVE.W writes $800F: N set, ZVC clear. */
+    machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xffe0) | 0x08);
+    return BS_RECOMP_OK;
+}
+
+/* LODGAM $24DDE.  The $2471A table entry reaches it with track one.  The
+ * request is only latched when no fade or pending change is already running. */
+static void select_music(BsRecomp *machine, uint16_t track)
+{
+    const uint32_t state = 0x251f8;
+    bs_recomp_write8(machine, state + 2, 0);
+    if (bs_recomp_read8(machine, state + 3) != 0) {
+        bs_recomp_write8(machine, state + 1,
+                         bs_recomp_read8(machine, state + 3));
+        bs_recomp_write8(machine, state + 3, 0);
+    }
+    uint8_t busy = bs_recomp_read8(machine, state + 4);
+    if (busy != 0) {
+        machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) |
+                                     (busy & 0x80 ? 0x08 : 0));
+        return;
+    }
+    uint16_t pending = bs_recomp_read16(machine, state + 10);
+    if (pending != 0) {
+        machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) |
+                                     (pending & 0x8000 ? 0x08 : 0));
+        return;
+    }
+    bs_recomp_write16(machine, state + 8, track);
+    bs_recomp_write8(machine, state + 0, 1);
+    if (track == 1) {
+        /* The CMPI.W that takes the branch leaves Z set. */
+        machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+        return;
+    }
+    bs_recomp_write16(machine, state + 10, 1);
+    machine->cpu.sr &= 0xfff0;
+}
+
 static int run_new_game_sequence(BsRecomp *machine)
 {
     const uint32_t base = machine->cpu.a[5];
@@ -952,19 +1058,33 @@ static int run_new_game_sequence(BsRecomp *machine)
             bs_recomp_write32(machine, base + 7214, 0x49fc8);
     }
 
-    /* The overlay music entry points at $246F0/$2471A are intentionally a
-     * separate audio milestone.  All architectural state after them is
-     * retained here, with Paula left silent rather than latching a tone. */
     bs_recomp_write16(machine, base + 7206, 0x00a0);
     bs_recomp_write32(machine, base + 7214, 0x49e20);
-    bs_recomp_write8(machine, base - 26245,
-                     bs_recomp_read8(machine, base - 26245) & 0x7f);
+    /* $A56/$A5C: bring up the gameplay audio system and ask it for track one.
+     * The CIA-B timer interrupt this arms is not dispatched yet, so the
+     * sequencer does not advance and Paula stays silent. */
+    if (gameplay_audio_init(machine)) return BS_RECOMP_ERROR;
+    select_music(machine, 1);
+    /* $A62-$A86.  Both entries into this sequence leave bit 7 of the audio
+     * state byte set, so the two conditional LODGAM calls are live rather
+     * than skipped as they were while audio was deferred. */
+    if (bs_recomp_read8(machine, base - 26245) & 0x80) {
+        bs_recomp_write8(machine, base - 26245,
+                         (uint8_t)(bs_recomp_read8(machine, base - 26245) &
+                                   0x7f));
+        if (bs_recomp_read8(machine, base + 10941) == 0)
+            /* $24708 -> $24D06: flip the sequencer's alternating bit. */
+            bs_recomp_write8(machine, 0x251fd,
+                (uint8_t)(bs_recomp_read8(machine, 0x251fd) ^ 0x01));
+        if (bs_recomp_read8(machine, base + 10953) == 0)
+            /* $24702 -> $24CFC: ask the timer interrupt to reset channels. */
+            bs_recomp_write16(machine, 0x24e32, 1);
+    }
     bs_recomp_write8(machine, base - 26244,
                      bs_recomp_read8(machine, base + 10941));
     bs_recomp_write8(machine, base - 26243,
                      bs_recomp_read8(machine, base + 10953));
     bs_recomp_write8(machine, 0xbfec01, 0);
-    bs_recomp_write16(machine, 0xdff096, 0x000f);
     bs_recomp_write16(machine, machine->cpu.a[6] + 150, 0x8020);
     machine->cpu.pc = 0xaa0;
     machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x08);

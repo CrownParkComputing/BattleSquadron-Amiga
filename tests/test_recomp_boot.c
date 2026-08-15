@@ -1014,6 +1014,35 @@ int main(void)
           "fire-to-start did not complete the $926 new-game sequence");
     CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) == 0,
           "fire-to-start left the attract-demo flag set");
+
+    /* $A56 brings up LODGAM's audio system: CIA-B timer A armed at its $31
+     * period with the timer interrupt enabled, the handler vector installed,
+     * and all four audio DMA channels enabled. */
+    CHECK(bs_recomp_read8(machine, 0xbfd500) == 0x31 &&
+          bs_recomp_read8(machine, 0xbfde00) == 0x11 &&
+          bs_recomp_read8(machine, 0xbfdd00) == 0x81 &&
+          bs_recomp_read32(machine, 0x000008) == 0x00024f34,
+          "the gameplay audio system did not arm the CIA-B sequencer timer");
+    CHECK((bs_recomp_read16(machine, 0xdff096) & 0x000f) == 0x000f,
+          "the gameplay audio system did not enable the audio DMA channels");
+    /* Each channel is seeded from its descriptor with the volume silenced. */
+    for (unsigned channel = 0; channel < 4; channel++) {
+        uint32_t state = 0x252a4 + channel * 0x3e;
+        uint32_t paula = bs_recomp_read32(machine, state);
+        CHECK(paula == 0xdff0a0 + channel * 0x10 &&
+              bs_recomp_read16(machine, paula + 8) == 0 &&
+              bs_recomp_read32(machine, state + 4) == 0x25504 &&
+              bs_recomp_read32(machine, state + 0x0c) ==
+                  bs_recomp_read32(machine, state + 8) &&
+              bs_recomp_read8(machine, state + 0x3a) == 1,
+              "a gameplay audio channel was not initialised from $25504");
+    }
+    /* $A5C asks for track one, which latches as a pending request the
+     * not-yet-dispatched timer interrupt would act on. */
+    CHECK(bs_recomp_read8(machine, 0x251f8) == 1 &&
+          bs_recomp_read16(machine, 0x251f8 + 8) == 1 &&
+          bs_recomp_read16(machine, 0x251f8 + 10) == 0,
+          "the gameplay audio system did not latch a request for track one");
     CHECK(bs_recomp_read32(machine, machine->cpu.a[5] + 13182) == 0xfffffffe &&
           bs_recomp_read8(machine, machine->cpu.a[5] - 26245) == 0x01,
           "fire-to-start new-game state differs from the title entry");
