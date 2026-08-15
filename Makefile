@@ -169,6 +169,13 @@ build/battle_squadron_recomp_preview: src/recomp/preview.c \
 		echo "recomp preview: PASS (no Musashi/m68k runtime symbols)"; \
 	fi
 
+build/render_frame: tools/render_frame.c src/recomp/runtime.c \
+		src/recomp/overlay.c src/recomp/bond.c src/platform/ocs_video.c
+	mkdir -p build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/recomp -Isrc/platform -o $@ $^ -lm
+
+render-frame: build/render_frame
+
 recomp-preview: build/battle_squadron_recomp_preview
 
 show-recomp: build/battle_squadron_recomp_preview
@@ -201,5 +208,5 @@ native-smoke: build/battle_squadron_native
 		--expect-blits 1000000
 
 .PHONY: verify regen test unit-test integration-test native native-smoke \
-	recomp-test recomp-preview show-recomp map-test map-extract map-preview \
+	recomp-test recomp-preview show-recomp render-frame map-test map-extract map-preview \
 	show-map playable run
