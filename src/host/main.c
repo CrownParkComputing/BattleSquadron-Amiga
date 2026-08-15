@@ -160,11 +160,16 @@ int main(int argc, char **argv)
                 unsigned record = 0x2dc80 + slot * 0x50;
                 unsigned x = (chip[record] << 8) | chip[record + 1];
                 if (!x) continue;
-                printf("  hos %2u x=%4u y=%4u type=$%02X f29=%3u f30=$%02X "
-                       "dmg62=%3u f63=%3u\n",
-                       slot, x, (chip[record + 2] << 8) | chip[record + 3],
-                       chip[record + 31], chip[record + 29], chip[record + 30],
-                       chip[record + 62], chip[record + 63]);
+                printf("  hos %2u x=%4u y=%4u type=$%02X f29=%3u f63=%3u "
+                       "gfx36=$%06X gfx32=$%06X h50=%u w52=%u\n",
+                       slot, x, (chip[record + 4] << 8) | chip[record + 5],
+                       chip[record + 31], chip[record + 29], chip[record + 63],
+                       (chip[record+36]<<24)|(chip[record+37]<<16)|
+                       (chip[record+38]<<8)|chip[record+39],
+                       (chip[record+32]<<24)|(chip[record+33]<<16)|
+                       (chip[record+34]<<8)|chip[record+35],
+                       (chip[record+50]<<8)|chip[record+51],
+                       (chip[record+52]<<8)|chip[record+53]);
             }
             fflush(stdout);
         }
