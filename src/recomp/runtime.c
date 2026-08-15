@@ -1260,6 +1260,41 @@ static uint32_t allocate_enemy_projectile(BsRecomp *machine,
  * terrain-mode-zero objects.  This is the first live gameplay object path:
  * target selection, direction animation, clipping and render-list emission
  * are all direct C operations on the original object ABI. */
+/* ABCD with X clear, which is how the bonus counter at +97 is incremented. */
+static uint8_t bcd_increment(uint8_t value)
+{
+    uint8_t low = (uint8_t)((value & 0x0f) + 1);
+    uint8_t high = (uint8_t)(value >> 4);
+    if (low > 9) { low = (uint8_t)(low - 10); high++; }
+    if (high > 9) high = (uint8_t)(high - 10);
+    return (uint8_t)((high << 4) | low);
+}
+
+/* LODGAM $24D6E via the $2470E table entry.  Points one channel at a sample
+ * descriptor from the $2539C table and stops its DMA; the channel update in
+ * the timer interrupt is what restarts it, so this stages a sound rather than
+ * making one on its own. */
+static void play_sound_effect(BsRecomp *machine, uint16_t sound)
+{
+    if (bs_recomp_read8(machine, 0x251fd) != 0) return;
+    uint32_t channel = bs_recomp_read32(machine,
+        0x24e22 + (uint32_t)((sound & 0x0030) >> 2));
+    if (bs_recomp_read8(machine, channel + 61) != 0) return;
+    bs_recomp_write8(machine, channel + 58, 1);
+    bs_recomp_write16(machine, 0xdff096,
+                      bs_recomp_read16(machine, channel + 46));
+    /* Twelve-byte descriptors: pointer, length, period, volume, duration. */
+    uint32_t entry = 0x2539c + (uint32_t)((sound & 0x000f) * 12);
+    bs_recomp_write8(machine, channel + 60,
+                     bs_recomp_read8(machine, entry + 11));
+    bs_recomp_write8(machine, channel + 59, 1);
+    uint32_t paula = bs_recomp_read32(machine, channel);
+    bs_recomp_write32(machine, paula, bs_recomp_read32(machine, entry));
+    bs_recomp_write16(machine, paula + 4, bs_recomp_read16(machine, entry + 4));
+    bs_recomp_write16(machine, paula + 6, bs_recomp_read16(machine, entry + 6));
+    bs_recomp_write16(machine, paula + 8, bs_recomp_read16(machine, entry + 8));
+}
+
 static int update_type20_mode0_pool(BsRecomp *machine)
 {
     const uint32_t base = machine->cpu.a[5];
@@ -1307,10 +1342,52 @@ static int update_type20_mode0_pool(BsRecomp *machine)
                 if (state >= live_limit) {
                     uint8_t final_state = bs_recomp_read8(machine,
                                                            object + 33);
-                    if (state < final_state &&
-                        !(bs_recomp_read8(machine, base - 28551) & 2)) {
-                        state++;
-                        bs_recomp_write8(machine, object + 25, state);
+                    if (state < final_state) {
+                        if (!(bs_recomp_read8(machine, base - 28551) & 2)) {
+                            state++;
+                            bs_recomp_write8(machine, object + 25, state);
+                        }
+                    } else if (type == 0x20 && state == final_state) {
+                        /* LAB_699C.  A finished type-$20 wreck is collectable:
+                         * a player overlapping it scores the BCD bonus at +97
+                         * and the wreck advances one state past its last
+                         * animation frame. */
+                        uint16_t left = bs_recomp_read16(machine, object);
+                        uint16_t top = bs_recomp_read16(machine, object + 2);
+                        if (bs_recomp_read16(machine, base + 7228) == 3)
+                            left = (uint16_t)(left - 8);
+                        uint16_t right = (uint16_t)(left + 0x14);
+                        uint16_t bottom = (uint16_t)(top + 0x10);
+                        left = (uint16_t)(left - 8);
+                        top = (uint16_t)(top - 0x0c);
+
+                        uint8_t collected = 0;
+                        static const uint32_t claimants[] = {0x4e3c, 0x4f46};
+                        for (unsigned index = 0; index < 2; index++) {
+                            uint32_t claimant = claimants[index];
+                            /* $6A06 */
+                            if (bs_recomp_read8(machine, claimant + 38) >= 0x4b)
+                                continue;
+                            int16_t px = (int16_t)bs_recomp_read16(machine,
+                                                                   claimant + 4);
+                            int16_t py = (int16_t)bs_recomp_read16(machine,
+                                                                   claimant + 6);
+                            if ((int16_t)left > px || (int16_t)top > py ||
+                                (int16_t)right < px || (int16_t)bottom < py)
+                                continue;
+                            uint8_t bonus = bs_recomp_read8(machine,
+                                                             claimant + 97);
+                            if (bonus == 0x99) continue;
+                            bs_recomp_write8(machine, claimant + 97,
+                                             bcd_increment(bonus));
+                            collected++;
+                        }
+                        if (collected != 0) {
+                            bs_recomp_write8(machine, object + 25,
+                                (uint8_t)(bs_recomp_read8(machine,
+                                                          object + 33) + 1));
+                            play_sound_effect(machine, 53);
+                        }
                     }
                     skip_object_behaviour = 1;
                 } else {
