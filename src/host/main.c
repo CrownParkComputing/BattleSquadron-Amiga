@@ -155,6 +155,16 @@ int main(int argc, char **argv)
                        chip[object + 25], chip[object + 28],
                        chip[object + 30], chip[object + 33]);
             }
+            for (unsigned slot = 0; slot < 12; slot++) {
+                unsigned record = 0x2dc80 + slot * 0x50;
+                unsigned x = (chip[record] << 8) | chip[record + 1];
+                if (!x) continue;
+                printf("  hos %2u x=%4u y=%4u type=$%02X f29=%3u f30=$%02X "
+                       "dmg62=%3u f63=%3u\n",
+                       slot, x, (chip[record + 2] << 8) | chip[record + 3],
+                       chip[record + 31], chip[record + 29], chip[record + 30],
+                       chip[record + 62], chip[record + 63]);
+            }
             fflush(stdout);
         }
         if (mix_audio) {

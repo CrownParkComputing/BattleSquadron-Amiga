@@ -1944,6 +1944,58 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
             if (selected_half && selected_pass && !(flags & 0x40)) {
                 flags |= 0x40;
                 bs_recomp_write8(machine, projectile + 30, flags);
+                uint16_t height = bs_recomp_read16(machine,
+                                                    projectile + 50);
+
+                /* $7A3C-$7A64.  A record that has been hit runs its explosion
+                 * instead of its behaviour: the counter at +29 steps down on
+                 * alternate frames, advancing the explosion graphics, and the
+                 * record is freed when it reaches zero.  Without this the
+                 * counter stayed where the hit left it, so a hit ship kept
+                 * its first explosion frame and never went away. */
+                uint8_t exploding = bs_recomp_read8(machine, projectile + 29);
+                if (exploding != 0) {
+                    if (!(bs_recomp_read8(machine, base - 28551) & 2)) {
+                        uint8_t countdown = (uint8_t)(exploding - 1);
+                        bs_recomp_write8(machine, projectile + 29, countdown);
+                        if (countdown != 0) {
+                            bs_recomp_write32(machine, projectile + 36,
+                                bs_recomp_read32(machine, projectile + 36) +
+                                    0x300);
+                            bs_recomp_write32(machine, projectile + 32,
+                                bs_recomp_read32(machine, projectile + 32) +
+                                    0x300);
+                        } else if (bs_recomp_read8(machine,
+                                                   projectile + 31) != 0) {
+                            /* $7A66 into LAB_98E2: the record is freed. */
+                            bs_recomp_write16(machine, projectile, 0);
+                            goto next_projectile;
+                        } else {
+                            /* A finished type-zero record counts the others;
+                             * being the last one takes the $9986 wave path. */
+                            unsigned remaining = 0;
+                            for (int other = 0; other < 12; other++) {
+                                uint32_t record = 0x2dc80 + other * 0x50;
+                                if (bs_recomp_read8(machine, record + 31) == 0 &&
+                                    bs_recomp_read16(machine, record) != 0)
+                                    remaining++;
+                            }
+                            if (remaining == 1) {
+                                snprintf(machine->error, sizeof machine->error,
+                                    "untranslated last-projectile wave path "
+                                    "at $009986");
+                                return BS_RECOMP_UNTRANSLATED;
+                            }
+                        }
+                    }
+                    /* LAB_9814 draws it from the explosion's own graphics. */
+                    machine->cpu.a[2] =
+                        bs_recomp_read32(machine, projectile + 36);
+                    machine->cpu.a[3] =
+                        bs_recomp_read32(machine, projectile + 32);
+                    goto render_projectile;
+                }
+
                 if (type != 0 && type != 1 && type != 3 && type != 4 &&
                     type != 6 && type != 7 && type != 8) {
                     snprintf(machine->error, sizeof machine->error,
@@ -1952,8 +2004,6 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
                     return BS_RECOMP_UNTRANSLATED;
                 }
 
-                uint16_t height = bs_recomp_read16(machine,
-                                                    projectile + 50);
                 if (type == 0) {
                     /* LAB_9752: script-driven stage projectile.  A zero
                      * duration fetches the next velocity command; $FF/0
@@ -2812,6 +2862,7 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
                         bs_recomp_read16(machine, projectile + 44);
                 }
 
+render_projectile:
                 y = bs_recomp_read16(machine, projectile + 4);
                 if (y >= 0x0200 || height == 0) {
                     bs_recomp_write16(machine, projectile, 0);
