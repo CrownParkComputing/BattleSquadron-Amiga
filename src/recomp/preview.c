@@ -365,6 +365,56 @@ int main(int argc, char **argv)
                 source = video_source(machine);
                 pixels = ocs_video_render(video, &source);
                 UpdateTexture(texture, pixels);
+                if (stage == PRESENT_GAME && getenv("BS_TRACE_GOLD")) {
+                    /* Report compact clusters of the gold sprite colours and
+                     * every record that could be drawing them. */
+                    static int trace_frame;
+                    int gold = 0, minx = 999, maxx = -1, miny = 999,
+                        maxy = -1;
+                    for (int i = 0;
+                         i < OCS_VIDEO_WIDTH * OCS_VIDEO_HEIGHT; i++) {
+                        unsigned R = pixels[i] & 0xff;
+                        unsigned G = (pixels[i] >> 8) & 0xff;
+                        unsigned B = (pixels[i] >> 16) & 0xff;
+                        if (R > 150 && B < 110 && G < R) {
+                            int x = i % OCS_VIDEO_WIDTH;
+                            int y = i / OCS_VIDEO_WIDTH;
+                            gold++;
+                            if (x < minx) minx = x;
+                            if (x > maxx) maxx = x;
+                            if (y < miny) miny = y;
+                            if (y > maxy) maxy = y;
+                        }
+                    }
+                    if (gold >= 15 && (++trace_frame % 20) == 0) {
+                        unsigned scroll =
+                            bs_recomp_read16(machine, 0x8000 + 7204);
+                        fprintf(stderr, "GOLD n=%d bbox %d..%d,%d..%d "
+                                "scroll=%u\n", gold, minx, maxx, miny,
+                                maxy, scroll);
+                        for (int k = 0; k < 12; k++) {
+                            uint32_t r = 0x2dc80 + k * 0x50;
+                            if (!bs_recomp_read16(machine, r)) continue;
+                            fprintf(stderr, "  hos %2d screen %4d,%4d "
+                                    "type=$%02X f29=%u f63=%u h50=%u\n", k,
+                                (int)bs_recomp_read16(machine, r) -
+                                    (int)scroll,
+                                (int)bs_recomp_read16(machine, r + 4) - 0x100,
+                                bs_recomp_read8(machine, r + 31),
+                                bs_recomp_read8(machine, r + 29),
+                                bs_recomp_read8(machine, r + 63),
+                                bs_recomp_read16(machine, r + 50));
+                        }
+                        for (int k = 0; k < 16; k++) {
+                            uint32_t e = 0x4976 + k * 20;
+                            if (!bs_recomp_read16(machine, e)) continue;
+                            fprintf(stderr, "  fx  %2d screen %4d,%4d\n", k,
+                                (int)bs_recomp_read16(machine, e) -
+                                    (int)scroll,
+                                (int)bs_recomp_read16(machine, e + 4) - 0x100);
+                        }
+                    }
+                }
                 if (stage == PRESENT_GAME)
                     memcpy(machine->memory + 0x62000, clean_playfield,
                            0x1e000);

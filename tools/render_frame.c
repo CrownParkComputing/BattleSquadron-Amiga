@@ -30,11 +30,21 @@ int main(int argc, char **argv){
     BsRecomp *m=calloc(1,sizeof *m);
     uint8_t *clean=malloc(0x1e000);
     if(bs_recomp_init(m,"original/whdload/BattleSquadron/data")!=BS_RECOMP_OK) return 1;
-    bs_recomp_run(m,20000);
-    bs_recomp_set_input(m,0,BS_INPUT_FIRE);
-    for(long g=0;g<20000&&m->cpu.pc!=0xd52;g++) if(bs_recomp_run(m,1)!=BS_RECOMP_OK) return 1;
-    bs_recomp_run(m,14);
-    bs_recomp_set_input(m,0,0);
+    /* Same entry as the preview: it hands the playfield restore to the host
+     * and reaches the game through the title rather than the attract demo. */
+    bs_recomp_set_external_playfield_restore(m,1);
+    struct { long steps; uint32_t pc; const char *name; } edges[] = {
+        {38,0x4ec,"spoken intro"}, {46,0x5f6,"title"},
+        {16,0x6fa,"second title"}, {40,0x7d0,"game setup"},
+    };
+    for(unsigned e=0;e<4;e++){
+        if(bs_recomp_run(m,edges[e].steps)!=BS_RECOMP_OK ||
+           m->cpu.pc!=edges[e].pc){
+            printf("%s: pc=$%06x %s\n",edges[e].name,m->cpu.pc,m->error);
+            return 1; }
+    }
+    if(bs_recomp_start_new_game(m)!=BS_RECOMP_OK){
+        printf("new game: %s\n",m->error); return 1; }
     bs_recomp_enable_live_input(m,1);
 
     OcsVideo *video=ocs_video_create();
