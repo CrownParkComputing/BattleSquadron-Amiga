@@ -1,0 +1,6 @@
+build/
+original/whdload/
+original/*.bin
+original/modules/
+assets/*.bin
+__pycache__/

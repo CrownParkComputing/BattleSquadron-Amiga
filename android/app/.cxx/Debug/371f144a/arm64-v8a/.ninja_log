@@ -1,0 +1,19 @@
+# ninja log v7
+2	110	1786740406337475932	raylib/raylib/CMakeFiles/raylib.dir/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue/android_native_app_glue.c.o	c4b143b67f343138
+2	188	1786740406336905078	raylib/raylib/CMakeFiles/raylib.dir/rshapes.c.o	b26bbaef73c05176
+2	321	1786740406337104062	raylib/raylib/CMakeFiles/raylib.dir/rtext.c.o	7516b122a68948ba
+2	233	1786740432510088133	CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/amiga.c.o	8d5216e3eaa14566
+2	391	1786740432510253164	CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kcpu.c.o	2e39fb796ed15837
+2	471	1786740432510518353	CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kdasm.c.o	6898d0c488e5bbc1
+1	630	1786740406336621434	raylib/raylib/CMakeFiles/raylib.dir/rcore.c.o	de15ef32c9a0f489
+2	701	1786740432510618923	CMakeFiles/main.dir/home/jon/SWIV/src/musashi/softfloat/softfloat.c.o	6a053ee22e13bfef
+1	1070	1786740406336774772	raylib/raylib/CMakeFiles/raylib.dir/rmodels.c.o	840bcc62814ab2e2
+2	1539	1786740406337265456	raylib/raylib/CMakeFiles/raylib.dir/rtextures.c.o	f9ab7637ef1561c0
+1	2010	1786740406335073537	raylib/raylib/CMakeFiles/raylib.dir/raudio.c.o	3f53c18f2bb3b02a
+2	3783	1786740432510371467	CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kops.c.o	7c0a6968e7a73c44
+2	72	1786740432509262626	CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/frontend.c.o	a2704ce7148fd31a
+2	86	1786740432510744790	raylib/raylib/libraylib.a	cdd748a60b97ea04
+2	66	1786740465252499076	/home/jon/BattleSquadron-Amiga/android/app/build/intermediates/cxx/Debug/371f144a/obj/arm64-v8a/libmain.so	f23ee06f60d6736d
+202	1084	1786740949522987241	CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/frontend.c.o	a2704ce7148fd31a
+203	1213	1786740949523987249	CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/amiga.c.o	8d5216e3eaa14566
+1213	1778	1786740950533994511	/home/jon/BattleSquadron-Amiga/android/app/build/intermediates/cxx/Debug/371f144a/obj/arm64-v8a/libmain.so	f23ee06f60d6736d
