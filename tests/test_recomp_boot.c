@@ -974,8 +974,11 @@ int main(void)
             (long)machine->translated_steps);
 
     /* Holding a fire button through the attract demo takes LAB_D52's
-     * fire-to-start path.  Port 0 fire is bit 6 of CIA-A port A, active low. */
-    machine->ciaa[0] = 0xbf;
+     * fire-to-start path.  This drives it the way a frontend does, through the
+     * public input API, which must reach CIA-A port A bit 7 for player one. */
+    bs_recomp_set_input(machine, 0, BS_INPUT_FIRE);
+    CHECK(machine->ciaa[0] == 0x7f,
+          "player-one fire did not reach CIA-A port A bit 7");
     int reached_start = 0;
     for (long guard = 0; guard < 400000 && !reached_start; guard++) {
         result = bs_recomp_run(machine, 1);
@@ -1022,7 +1025,7 @@ int main(void)
           "fire-to-start game did not run on as a live game");
     fprintf(stderr, "fire-to-start: reached $AA0, %ld steps total\n",
             (long)machine->translated_steps);
-    machine->ciaa[0] = 0xff;
+    bs_recomp_set_input(machine, 0, 0);
     uint32_t translated_pc = machine->cpu.pc;
     machine->cpu.pc = 0x00dead;
     result = bs_recomp_run(machine, 1);

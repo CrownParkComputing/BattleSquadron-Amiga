@@ -153,6 +153,13 @@ void bs_recomp_set_input(BsRecomp *machine, unsigned player, uint8_t state)
 {
     if (!machine || player >= 2) return;
     machine->input[player] = state & 0x3f;
+    /* $9AC6/$9AE6 take player one's fire from CIA-A port A bit 7 and player
+     * two's from bit 6, both active low.  $D16 reads the same two bits to
+     * start a game out of the attract demo, so the host has to drive them
+     * rather than only the per-player direction mask. */
+    uint8_t mask = player == 0 ? 0x80 : 0x40;
+    if (state & BS_INPUT_FIRE) machine->ciaa[0] &= (uint8_t)~mask;
+    else machine->ciaa[0] |= mask;
 }
 
 void bs_recomp_set_external_playfield_restore(BsRecomp *machine, int enabled)
