@@ -339,8 +339,15 @@ int main(int argc, char **argv)
                     bs_recomp_enable_live_input(machine, 1);
                 }
             } else if (stage == PRESENT_GAME) {
+                /* One $AA0-to-$AA0 cycle covers both halves of the game loop
+                 * and so advances $1078 twice.  The reference advances it once
+                 * per PAL frame, which makes the loop a 25Hz one: running a
+                 * whole cycle every displayed frame ran the game at double
+                 * speed, which also halved every animation's duration. */
+                static int logic_phase;
                 update_input(machine);
-                if (!run_game_display_frame(machine, clean_playfield))
+                if (!(logic_phase++ & 1) &&
+                    !run_game_display_frame(machine, clean_playfield))
                     finished = 1;
             }
             paula_audio_queue_pal_frame(audio_output);

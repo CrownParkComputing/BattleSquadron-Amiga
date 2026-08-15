@@ -135,9 +135,10 @@ int main(int argc, char **argv)
         if (dump_state && bs_frame_no % dump_state == 0) {
             /* Reference values for the recompilation to diff against: the
              * player record and every live active-object slot. */
-            printf("state frame=%ld p1 x=%u y=%u s38=%u c48=%u d49=%u "
-                   "inv52=%u lives56=%u wpn60=%u\n",
+            printf("state frame=%ld t1078=%u p1 x=%u y=%u s38=%u c48=%u "
+                   "d49=%u inv52=%u lives56=%u wpn60=%u\n",
                    bs_frame_no,
+                   (chip[0x1078] << 8) | chip[0x1079],
                    (chip[0x4e40] << 8) | chip[0x4e41],
                    (chip[0x4e42] << 8) | chip[0x4e43],
                    chip[0x4e3c + 38], chip[0x4e3c + 48], chip[0x4e3c + 49],
