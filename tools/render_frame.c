@@ -90,6 +90,16 @@ int main(int argc, char **argv){
                         k,(int)bs_recomp_read16(m,o)-(int)sc,
                         (int)bs_recomp_read16(m,o+2)-0x100,
                         bs_recomp_read8(m,o+17),bs_recomp_read8(m,o+25)); }
+                for(int k=0;k<16;k++){ unsigned e=0x4976+k*20;
+                    if(!bs_recomp_read16(m,e)) continue;
+                    printf("  fx  %2d screen %4d,%4d\n",k,
+                        (int)bs_recomp_read16(m,e)-(int)sc,
+                        (int)bs_recomp_read16(m,e+4)-0x100); }
+                for(int k=0;k<12;k++){ unsigned sh=0x4f46+122+k*12;
+                    if(!bs_recomp_read16(m,sh)) continue;
+                    printf("  p2shot %2d screen %4d,%4d\n",k,
+                        (int)bs_recomp_read16(m,sh)-(int)sc,
+                        (int)bs_recomp_read16(m,sh+2)-0x100); }
                 for(int k=0;k<12;k++){ unsigned sh=0x4e3c+122+k*12;
                     if(!bs_recomp_read16(m,sh)) continue;
                     printf("  shot %2d screen %4d,%4d\n",k,
