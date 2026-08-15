@@ -70,9 +70,31 @@ int main(int argc, char **argv){
                     if(y>maxy) maxy=y;
                 }
             }
-            if(gold>=20 && gold<=260 && f>=700 && maxx-minx<90 && maxy-miny<90){ found=1;
+            if(gold>=180 && f>=700){ found=1;
                 printf("gold pixels=%d bbox x %d..%d y %d..%d on frame %ld\n",
-                       gold,minx,maxx,miny,maxy,f); }
+                       gold,minx,maxx,miny,maxy,f);
+                unsigned sc=bs_recomp_read16(m,0x8000+7204);
+                printf("  scroll=%u\n",sc);
+                for(int k=0;k<12;k++){ unsigned r=0x2dc80+k*0x50;
+                    if(!bs_recomp_read16(m,r)) continue;
+                    printf("  hos %2d screen %4d,%4d type=$%02X f29=%u f63=%u "
+                           "h50=%u w52=%u gfx36=$%06X\n", k,
+                        (int)bs_recomp_read16(m,r)-(int)sc,
+                        (int)bs_recomp_read16(m,r+4)-0x100,
+                        bs_recomp_read8(m,r+31),bs_recomp_read8(m,r+29),
+                        bs_recomp_read8(m,r+63),bs_recomp_read16(m,r+50),
+                        bs_recomp_read16(m,r+52),bs_recomp_read32(m,r+36)); }
+                for(int k=0;k<18;k++){ unsigned o=0x2e040+k*0x50;
+                    if(!bs_recomp_read16(m,o)) continue;
+                    printf("  obj %2d screen %4d,%4d type=$%02X state25=%u\n",
+                        k,(int)bs_recomp_read16(m,o)-(int)sc,
+                        (int)bs_recomp_read16(m,o+2)-0x100,
+                        bs_recomp_read8(m,o+17),bs_recomp_read8(m,o+25)); }
+                for(int k=0;k<12;k++){ unsigned sh=0x4e3c+122+k*12;
+                    if(!bs_recomp_read16(m,sh)) continue;
+                    printf("  shot %2d screen %4d,%4d\n",k,
+                        (int)bs_recomp_read16(m,sh)-(int)sc,
+                        (int)bs_recomp_read16(m,sh+2)-0x100); } }
         }
         if(!found) memcpy(m->memory + 0x62000, clean, 0x1e000);
     }
