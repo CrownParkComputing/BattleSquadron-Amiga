@@ -1175,24 +1175,15 @@ static void write_render_record(BsRecomp *machine, uint32_t *cursor,
 
 /* Loader LAB_75E4/LAB_7608.  Keep this allocator independent of the map
  * scheduler: several live enemy state machines call the same routine. */
-static uint32_t allocate_enemy_projectile(BsRecomp *machine,
-                                          uint16_t relative_x,
-                                          uint16_t relative_y,
-                                          uint8_t type, uint32_t script)
+/* LAB_7608 on its own: build a record in place from its type descriptor.
+ * LAB_75E4 is the allocator that finds a free slot and falls into it, but
+ * $9986 reuses the record it already has. */
+static uint32_t init_enemy_projectile(BsRecomp *machine, uint32_t record,
+                                      uint16_t relative_x,
+                                      uint16_t relative_y,
+                                      uint8_t type, uint32_t script)
 {
     const uint32_t base = machine->cpu.a[5];
-    if (bs_recomp_read8(machine, base - 16120) != 0 &&
-        bs_recomp_read8(machine, base - 28516) == 0)
-        return 0;
-
-    uint32_t record = 0x2dff0;
-    int slot = 11;
-    while (slot >= 0 && bs_recomp_read16(machine, record) != 0) {
-        record -= 0x50;
-        slot--;
-    }
-    if (slot < 0) return 0;
-
     uint32_t descriptor = 0xcd7a + (uint32_t)type * 0x20;
     uint16_t x = relative_x;
     if (x >= 0x0320)
@@ -1254,6 +1245,27 @@ static uint32_t allocate_enemy_projectile(BsRecomp *machine,
     machine->cpu.a[0] = record;
     machine->cpu.a[2] = descriptor;
     return record;
+}
+
+static uint32_t allocate_enemy_projectile(BsRecomp *machine,
+                                          uint16_t relative_x,
+                                          uint16_t relative_y,
+                                          uint8_t type, uint32_t script)
+{
+    const uint32_t base = machine->cpu.a[5];
+    if (bs_recomp_read8(machine, base - 16120) != 0 &&
+        bs_recomp_read8(machine, base - 28516) == 0)
+        return 0;
+
+    uint32_t record = 0x2dff0;
+    int slot = 11;
+    while (slot >= 0 && bs_recomp_read16(machine, record) != 0) {
+        record -= 0x50;
+        slot--;
+    }
+    if (slot < 0) return 0;
+    return init_enemy_projectile(machine, record, relative_x, relative_y,
+                                 type, script);
 }
 
 /* Covered native path through loader $5F34-$6FFA for active type-$20,
@@ -1932,6 +1944,7 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
     machine->cpu.d[0] = 11;
     for (int slot = 0; slot < 12; slot++) {
         uint32_t projectile = machine->cpu.a[4];
+reprocess_projectile:
         if (bs_recomp_read16(machine, projectile) != 0) {
             uint16_t y = bs_recomp_read16(machine, projectile + 4);
             int selected_half = y <= 0x0146
@@ -1981,10 +1994,34 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
                                     remaining++;
                             }
                             if (remaining == 1) {
-                                snprintf(machine->error, sizeof machine->error,
-                                    "untranslated last-projectile wave path "
-                                    "at $009986");
-                                return BS_RECOMP_UNTRANSLATED;
+                                /* $9986: clearing the last record of a wave
+                                 * turns it into a type-5 pickup that drifts
+                                 * away from the side it appeared on. */
+                                uint16_t drift = (uint16_t)(
+                                    bs_recomp_read16(machine, projectile) -
+                                    bs_recomp_read16(machine, base + 7204) +
+                                    8);
+                                init_enemy_projectile(machine, projectile,
+                                    0x63,
+                                    (uint16_t)(bs_recomp_read16(machine,
+                                        projectile + 4) - 0x00f4),
+                                    5, (uint32_t)drift << 16);
+                                bs_recomp_write8(machine, projectile + 28,
+                                                 0x0a);
+                                if ((int16_t)bs_recomp_read16(machine,
+                                        projectile + 12) >= 0x0088) {
+                                    bs_recomp_write8(machine, projectile + 27,
+                                        (uint8_t)~bs_recomp_read8(machine,
+                                            projectile + 27));
+                                    bs_recomp_write32(machine, projectile + 8,
+                                                      0xfffe0000);
+                                } else {
+                                    bs_recomp_write32(machine, projectile + 8,
+                                                      0x00020000);
+                                }
+                                /* $79F2 re-enters this slot, and the fresh
+                                 * record has its pass flag cleared again. */
+                                goto reprocess_projectile;
                             }
                         }
                     }
@@ -1997,7 +2034,7 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
                 }
 
                 if (type != 0 && type != 1 && type != 3 && type != 4 &&
-                    type != 6 && type != 7 && type != 8) {
+                    type != 5 && type != 6 && type != 7 && type != 8) {
                     snprintf(machine->error, sizeof machine->error,
                              "untranslated live projectile type $%02x at "
                              "$%06x", type, projectile);
@@ -2449,6 +2486,67 @@ static int update_enemy_projectile_pool(BsRecomp *machine)
                         machine, projectile + 36) +
                         (uint32_t)sprite * frame_stride;
                     machine->cpu.a[3] = machine->cpu.a[2] + frame_stride -
+                        bs_recomp_read16(machine, projectile + 44);
+                } else if (type == 5) {
+                    /* LAB_8A8A: the collectable dropped when a wave is
+                     * cleared.  It drifts sideways, reversing at the edges,
+                     * sinks down the screen and is freed off the bottom. */
+                    bs_recomp_write8(machine, projectile + 30,
+                        (uint8_t)(bs_recomp_read8(machine, projectile + 30) |
+                                  0x80));
+                    int16_t drift = (int16_t)bs_recomp_read16(machine,
+                                                              projectile + 12);
+                    int32_t speed = (int32_t)bs_recomp_read32(machine,
+                                                              projectile + 8);
+                    if ((int8_t)bs_recomp_read8(machine, projectile + 27) < 0) {
+                        if (drift < 0x0047)
+                            bs_recomp_write8(machine, projectile + 27,
+                                (uint8_t)~bs_recomp_read8(machine,
+                                                          projectile + 27));
+                        if (speed > (int32_t)0xfffc0000)
+                            bs_recomp_write32(machine, projectile + 8,
+                                              (uint32_t)(speed - 0x2000));
+                    } else {
+                        if (drift > 0x00c9)
+                            bs_recomp_write8(machine, projectile + 27,
+                                (uint8_t)~bs_recomp_read8(machine,
+                                                          projectile + 27));
+                        if (speed < 0x00040000)
+                            bs_recomp_write32(machine, projectile + 8,
+                                              (uint32_t)(speed + 0x2000));
+                    }
+                    bs_recomp_write32(machine, projectile + 4,
+                        bs_recomp_read32(machine, projectile + 4) +
+                            (bs_recomp_read8(machine, base - 28516) != 0
+                                 ? 0x6000u : 0x8000u));
+                    if ((int16_t)bs_recomp_read16(machine, projectile + 4) >=
+                        0x0200) {
+                        bs_recomp_write16(machine, projectile, 0);
+                        goto next_projectile;
+                    }
+                    bs_recomp_write32(machine, projectile + 12,
+                        bs_recomp_read32(machine, projectile + 12) +
+                            bs_recomp_read32(machine, projectile + 8));
+                    bs_recomp_write16(machine, projectile,
+                        (uint16_t)(bs_recomp_read16(machine, base + 7204) +
+                                   bs_recomp_read16(machine, projectile + 12)));
+                    if (bs_recomp_read8(machine, projectile + 28) != 0x0a &&
+                        bs_recomp_read32(machine, projectile + 8) == 0)
+                        bs_recomp_write8(machine, projectile + 28,
+                            (uint8_t)((bs_recomp_read8(machine,
+                                projectile + 28) + 2) & 0x06));
+                    uint8_t frame = (uint8_t)(
+                        ((bs_recomp_read8(machine, base - 28551) >> 2) & 1) +
+                        bs_recomp_read8(machine, projectile + 28));
+                    bs_recomp_write8(machine, projectile + 63, frame);
+                    /* LAB_97F8 selects the frame from the record's own
+                     * graphics rather than a per-type table. */
+                    uint16_t stride = bs_recomp_read16(machine,
+                                                       projectile + 46);
+                    machine->cpu.a[2] =
+                        bs_recomp_read32(machine, projectile + 36) +
+                        (uint32_t)((uint16_t)(frame * stride));
+                    machine->cpu.a[3] = machine->cpu.a[2] + stride -
                         bs_recomp_read16(machine, projectile + 44);
                 } else if (type == 6) {
                     /* LAB_890C: oscillating vertical launcher/projectile. */

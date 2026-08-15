@@ -1144,12 +1144,11 @@ int main(void)
             was_dying = dying;
             was_respawning = respawning;
         }
-        CHECK(deaths == 2 && respawns == 3,
-              "the ship did not explode and respawn during the live game");
-        /* Enemy records now run their explosions and free themselves, so the
-         * game reaches the wave path taken when the last one is cleared. */
-        CHECK(result == BS_RECOMP_UNTRANSLATED && start->cpu.pc == 0xbca,
-              "the live game did not reach the last-projectile wave path");
+        CHECK(deaths == 3 && respawns == 3 &&
+              bs_recomp_read8(start, 0x4e3c + 56) == 0,
+              "the ship did not explode and respawn through its three lives");
+        CHECK(result == BS_RECOMP_UNTRANSLATED && start->cpu.pc == 0xcb2,
+              "the exhausted game did not stop at the game-over record path");
         fprintf(stderr,
                 "live game: %d deaths, %d respawns, %ld steps, stopped at "
                 "$%06x\n", deaths, respawns, (long)start->translated_steps,
