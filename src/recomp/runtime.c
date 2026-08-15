@@ -1501,6 +1501,62 @@ static int update_type20_mode0_pool(BsRecomp *machine)
                 }
             } else if (type == 0x21) {
                 /* Type $21 has no mode-zero behaviour before clipping. */
+            } else if (type == 0x27) {
+                /* $6D44-$6DCA.  The object watches a 32-pixel box around
+                 * itself and counts consecutive frames in which every live
+                 * player sits inside it; the tenth toggles the state byte at
+                 * -4100.  Any live player outside, or no live player at all,
+                 * resets the count. */
+                if ((int16_t)bs_recomp_read16(machine, object + 2) >= 0x01fc)
+                    bs_recomp_write16(machine, base + 7230, 0);
+                bs_recomp_write8(machine, object + 31,
+                    (uint8_t)(bs_recomp_read8(machine, object + 31) | 0x04));
+                uint8_t phase =
+                    (uint8_t)(bs_recomp_read8(machine, base - 28551) & 0x1f);
+                bs_recomp_write8(machine, object + 25,
+                                 (int8_t)phase < 8 ? 0 : 1);
+
+                uint16_t left = (uint16_t)(bs_recomp_read16(machine, object) -
+                                           0x10);
+                uint16_t right = (uint16_t)(bs_recomp_read16(machine, object) +
+                                            0x10);
+                uint16_t top = (uint16_t)(
+                    bs_recomp_read16(machine, object + 2) - 0x10);
+                uint16_t bottom = (uint16_t)(
+                    bs_recomp_read16(machine, object + 2) + 0x10);
+                uint8_t tally = 0;
+                /* $6DCE, run for each player record in turn. */
+                static const uint32_t watched[] = {0x4e3c, 0x4f46};
+                for (unsigned index = 0; index < 2; index++) {
+                    uint32_t player = watched[index];
+                    uint8_t life = bs_recomp_read8(machine, player + 38);
+                    if (life >= 0xaf || life == 0x64) continue;
+                    tally = (uint8_t)(tally + 1);
+                    int16_t px = (int16_t)bs_recomp_read16(machine,
+                                                            player + 4);
+                    int16_t py = (int16_t)bs_recomp_read16(machine,
+                                                            player + 6);
+                    /* The last edge is a strict compare, unlike the other
+                     * three. */
+                    int inside = (int16_t)left <= px && (int16_t)right >= px &&
+                                 (int16_t)top <= py && (int16_t)bottom > py;
+                    if (!inside) tally |= 0x80;
+                }
+                if ((tally & 0x80) || tally == 0) {
+                    bs_recomp_write8(machine, base - 8397, 0);
+                } else {
+                    uint8_t held = (uint8_t)(
+                        bs_recomp_read8(machine, base - 8397) + 1);
+                    bs_recomp_write8(machine, base - 8397, held);
+                    if ((int8_t)held >= 0x0a)
+                        bs_recomp_write8(machine, base - 4100,
+                            (uint8_t)~bs_recomp_read8(machine, base - 4100));
+                }
+                set_dreg_word(&machine->cpu.d[1], left);
+                set_dreg_word(&machine->cpu.d[2], top);
+                set_dreg_word(&machine->cpu.d[5], right);
+                set_dreg_word(&machine->cpu.d[6], bottom);
+                set_dreg_byte(&machine->cpu.d[4], tally);
             } else {
                 snprintf(machine->error, sizeof machine->error,
                          "untranslated active object path: slot=%d type=$%02x "
