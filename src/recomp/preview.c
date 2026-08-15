@@ -365,9 +365,52 @@ int main(int argc, char **argv)
         DrawTexturePro(texture,
             (Rectangle){0, 0, OCS_VIDEO_WIDTH, OCS_VIDEO_HEIGHT},
             fitted_screen(), (Vector2){0, 0}, 0, WHITE);
+        if (stage == PRESENT_GAME) {
+            /* Collision diagnostic.  Everything here is read straight out of
+             * the player record so what is on screen can be checked against
+             * what the translated collision passes actually did. */
+            static uint8_t was_dying, was_respawning;
+            static uint16_t was_weapon;
+            static unsigned deaths, respawns, pickups, hit_flash;
+            uint8_t dying = bs_recomp_read8(machine, 0x4e3c + 49);
+            uint8_t respawning = bs_recomp_read8(machine, 0x4e3c + 48);
+            uint16_t weapon = bs_recomp_read16(machine, 0x4e3c + 60);
+            if (dying && !was_dying) { deaths++; hit_flash = 40; }
+            if (respawning == 0x91 && was_respawning != 0x91) respawns++;
+            if (weapon > was_weapon) { pickups++; hit_flash = 20; }
+            was_dying = dying;
+            was_respawning = respawning;
+            was_weapon = weapon;
+            if (hit_flash) hit_flash--;
+
+            unsigned objects = 0;
+            for (int slot = 0; slot < 18; slot++)
+                if (bs_recomp_read16(machine, 0x2e040 + slot * 0x50) != 0)
+                    objects++;
+            unsigned shots = 0;
+            for (int slot = 0; slot < 12; slot++)
+                if (bs_recomp_read16(machine, 0x4e3c + 122 + slot * 12) != 0)
+                    shots++;
+
+            char line[192];
+            snprintf(line, sizeof line,
+                     "LIVES %u  WPN %u  ST $%02X  DYING %3u  INVUL %5u  "
+                     "OBJ %2u  SHOTS %2u  | DEATHS %u  RESPAWNS %u  "
+                     "PICKUPS %u",
+                     bs_recomp_read8(machine, 0x4e3c + 56), weapon,
+                     bs_recomp_read8(machine, 0x4e3c + 38), dying,
+                     bs_recomp_read16(machine, 0x4e3c + 52),
+                     objects, shots, deaths, respawns, pickups);
+            int y = GetScreenHeight() - 22;
+            DrawRectangle(0, y - 5, GetScreenWidth(), 27,
+                          (Color){0, 0, 0, 210});
+            DrawText(line, 10, y, 14,
+                     hit_flash ? (Color){255, 210, 80, 255}
+                               : (Color){170, 255, 170, 255});
+        }
         if (finished)
             DrawText("NATIVE FRONTIER REACHED - SEE TERMINAL DIAGNOSTIC",
-                     18, GetScreenHeight() - 26, 16, YELLOW);
+                     18, GetScreenHeight() - 52, 16, YELLOW);
         EndDrawing();
         stage_frame++;
     }
