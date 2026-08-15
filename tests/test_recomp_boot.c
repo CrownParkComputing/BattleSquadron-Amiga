@@ -972,6 +972,57 @@ int main(void)
           "attract cycle did not return to demo mode");
     fprintf(stderr, "attract cycle: %ld steps, no untranslated edge\n",
             (long)machine->translated_steps);
+
+    /* Holding a fire button through the attract demo takes LAB_D52's
+     * fire-to-start path.  Port 0 fire is bit 6 of CIA-A port A, active low. */
+    machine->ciaa[0] = 0xbf;
+    int reached_start = 0;
+    for (long guard = 0; guard < 400000 && !reached_start; guard++) {
+        result = bs_recomp_run(machine, 1);
+        if (result != BS_RECOMP_OK) break;
+        if (machine->cpu.pc == 0xd52) reached_start = 1;
+    }
+    CHECK(result == BS_RECOMP_OK && reached_start,
+          "held fire button did not reach LAB_D52 from the attract demo");
+
+    /* LODCOM and LODMUS share the $3D800 load address, so the resident jump
+     * at $3D80C decides which music-stop routine $D52 actually calls.  LODMUS
+     * is the driver running the attract demo. */
+    CHECK(bs_recomp_read16(machine, 0x3d80c) == 0x4ef9 &&
+          bs_recomp_read32(machine, 0x3d80e) == 0x0003dce4,
+          "the resident $3D80C entry is not LODMUS's music-stop jump");
+    /* DMACON and INTENA take Amiga set/clear writes, so the routine's raw
+     * $000F and $C000 land as cleared audio channels and a restored master
+     * interrupt enable.  The audio channels are already idle here because the
+     * LODMUS sequencer itself is not translated yet, so this pins the register
+     * effects rather than an audible stop. */
+    result = bs_recomp_run(machine, 1);
+    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0xd58 &&
+          (bs_recomp_read16(machine, 0xdff096) & 0x000f) == 0 &&
+          (bs_recomp_read16(machine, 0xdff09a) & 0x4000) != 0 &&
+          bs_recomp_read8(machine, 0xbfde00) == 0,
+          "fire-to-start did not stop the LODMUS timer and audio DMA");
+
+    /* The rest of $D52-$D94 is twelve dispatch steps and $926 completes the
+     * new-game sequence, leaving the live game at its $AA0 frame edge.  The
+     * $D6A overlay load replaces the driver that owns the stop request. */
+    result = bs_recomp_run(machine, 13);
+    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0xaa0,
+          "fire-to-start did not complete the $926 new-game sequence");
+    CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) == 0,
+          "fire-to-start left the attract-demo flag set");
+    CHECK(bs_recomp_read32(machine, machine->cpu.a[5] + 13182) == 0xfffffffe &&
+          bs_recomp_read8(machine, machine->cpu.a[5] - 26245) == 0x01,
+          "fire-to-start new-game state differs from the title entry");
+
+    /* The started game then runs as a live game, not a demo. */
+    result = bs_recomp_run(machine, 200000);
+    CHECK(result == BS_RECOMP_OK &&
+          bs_recomp_read8(machine, machine->cpu.a[5] - 28516) == 0,
+          "fire-to-start game did not run on as a live game");
+    fprintf(stderr, "fire-to-start: reached $AA0, %ld steps total\n",
+            (long)machine->translated_steps);
+    machine->ciaa[0] = 0xff;
     uint32_t translated_pc = machine->cpu.pc;
     machine->cpu.pc = 0x00dead;
     result = bs_recomp_run(machine, 1);

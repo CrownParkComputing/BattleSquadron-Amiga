@@ -59,8 +59,23 @@ Both `$D16` fire-button reads alias to CIA-A port A, whose inputs are active
 low. That register is now initialised to its idle high state; leaving it
 zeroed read as both buttons permanently held, which skipped the demo
 continuation branch entirely. Ten separate checks catch a regression of it.
-The remaining `$D16` edges are LAB_D52's fire-to-start, which needs the `$926`
-new-game entry translated as dispatch cases, and LAB_D98's game-over paths.
+
+LAB_D52's fire-to-start is translated as well, so pressing fire during the
+attract demo starts a real game: the run reaches `$AA0` through `$926` and
+continues as a live game, for 821,419 steps and 18 overlay loads. The `$926`
+new-game sequence is now shared between that path and the title's `$842` setup
+edge instead of being reachable only through `bs_recomp_start_new_game`.
+
+`$D52`'s music stop needed the resident-overlay distinction: LODCOM and LODMUS
+share the `$3D800` load address and provide different routines behind the
+`$3D80C` jump. LODMUS is the driver running the attract demo, and its routine
+stops the CIA-B sequencer timer and the audio DMA outright rather than setting
+LODCOM's pending-stop flag. The translation selects on the resident vector and
+fails closed on any third one. Because the LODMUS sequencer itself is still
+untranslated the audio channels are already idle, so that test pins the
+register effects rather than an audible stop.
+
+The remaining `$D16` edges are LAB_D98's game-over paths.
 
 The translated path now covers music-driver state initialisation, both palette
 algorithms, the six-page text intro/font compositor, title keyboard-help

@@ -868,23 +868,13 @@ static int scroll_frame(BsRecomp *machine)
  * This must not be replaced by a map-pointer seed: the attract path warms
  * the same ring while spawning demo objects, whereas $998 deliberately
  * performs terrain-only scrolls and palette convergence. */
-int bs_recomp_start_new_game(BsRecomp *machine)
+/* $926-$A9E.  The new-game state build-up and its 126-iteration transition.
+ * It is reached from the title's $842 setup edge and from LAB_D52 when a fire
+ * button starts a game out of the attract demo, so the overlay installation
+ * that precedes it belongs to each caller rather than here. */
+static int run_new_game_sequence(BsRecomp *machine)
 {
-    if (!machine || machine->cpu.pc != 0x7d0 || machine->cpu.a[5] == 0) {
-        if (machine)
-            snprintf(machine->error, sizeof machine->error,
-                     "new game requested outside the translated setup edge");
-        return BS_RECOMP_ERROR;
-    }
     const uint32_t base = machine->cpu.a[5];
-
-    /* $842/$852: install the gameplay audio overlay and stage-zero scenery
-     * data before any of the new-game state refers to them. */
-    if (load_module(machine, 0x1aa0) || load_module(machine, 0x19f8))
-        return BS_RECOMP_ERROR;
-    bs_recomp_write8(machine, base - 26245, 0x81);
-    bs_recomp_write8(machine, base - 26246, 0xff);
-
     machine->cpu.a[0] = 0xb2a0;
     clear32words(machine);
     bs_recomp_write32(machine, base + 13182, 0xfffffffe);
@@ -972,6 +962,26 @@ int bs_recomp_start_new_game(BsRecomp *machine)
     machine->cpu.pc = 0xaa0;
     machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x08);
     return BS_RECOMP_OK;
+}
+
+int bs_recomp_start_new_game(BsRecomp *machine)
+{
+    if (!machine || machine->cpu.pc != 0x7d0 || machine->cpu.a[5] == 0) {
+        if (machine)
+            snprintf(machine->error, sizeof machine->error,
+                     "new game requested outside the translated setup edge");
+        return BS_RECOMP_ERROR;
+    }
+    const uint32_t base = machine->cpu.a[5];
+
+    /* $842/$852: install the gameplay audio overlay and stage-zero scenery
+     * data before any of the new-game state refers to them. */
+    if (load_module(machine, 0x1aa0) || load_module(machine, 0x19f8))
+        return BS_RECOMP_ERROR;
+    bs_recomp_write8(machine, base - 26245, 0x81);
+    bs_recomp_write8(machine, base - 26246, 0xff);
+
+    return run_new_game_sequence(machine);
 }
 
 static void update_empty_entity_pool(BsRecomp *machine)
@@ -3461,11 +3471,10 @@ static int update_empty_effect_pool(BsRecomp *machine)
     return BS_RECOMP_OK;
 }
 
-static void update_sprite_bitplane_pointers(BsRecomp *machine)
+/* LAB_55BC on its own.  D1 holds the first bitplane address and D2 the stride
+ * between them; both are set by the caller. */
+static void set_bitplane_pointers(BsRecomp *machine)
 {
-    machine->cpu.d[1] = UINT32_C(0x0005e000) +
-        bs_recomp_read32(machine, machine->cpu.a[5] - 11826);
-    set_dreg_word(&machine->cpu.d[2], 0x0400);
     machine->cpu.a[1] = 0x558e;
     machine->cpu.d[0] = 7;
     for (int pointer = 0; pointer < 8; pointer++) {
@@ -3482,6 +3491,46 @@ static void update_sprite_bitplane_pointers(BsRecomp *machine)
                       (uint16_t)(machine->cpu.d[0] - 1));
     }
     machine->cpu.sr &= 0xfff0;
+}
+
+/* LAB_55AE falls straight into LAB_55BC with the gameplay playfield base. */
+static void update_sprite_bitplane_pointers(BsRecomp *machine)
+{
+    machine->cpu.d[1] = UINT32_C(0x0005e000) +
+        bs_recomp_read32(machine, machine->cpu.a[5] - 11826);
+    set_dreg_word(&machine->cpu.d[2], 0x0400);
+    set_bitplane_pointers(machine);
+}
+
+/* $3D80C is the second entry of the $3D800 overlay's jump table.  LODCOM and
+ * LODMUS share that load address and stop the music in entirely different
+ * ways, so the resident vector selects the translation rather than the call
+ * site.  Both routines end on a MOVE of a positive, non-zero immediate. */
+static int request_music_stop(BsRecomp *machine)
+{
+    uint32_t target = bs_recomp_read32(machine, 0x3d80e);
+    if (bs_recomp_read16(machine, 0x3d80c) == 0x4ef9 && target == 0x3dcd8) {
+        /* LODCOM: flag a pending stop in the driver state block at $3DEE8. */
+        if (bs_recomp_read8(machine, 0x3deeb) == 0)
+            bs_recomp_write8(machine, 0x3deeb,
+                             bs_recomp_read8(machine, 0x3dee9));
+        bs_recomp_write8(machine, 0x3deea, 1);
+        machine->cpu.sr &= 0xfff0;
+        return BS_RECOMP_OK;
+    }
+    if (bs_recomp_read16(machine, 0x3d80c) == 0x4ef9 && target == 0x3dce4) {
+        /* LODMUS: stop the CIA-B timer that clocks the sequencer and silence
+         * the four audio DMA channels, around a master-interrupt window. */
+        bs_recomp_write16(machine, 0xdff09a, 0x4000);
+        bs_recomp_write8(machine, 0xbfde00, 0);
+        bs_recomp_write16(machine, 0xdff09a, 0xc000);
+        bs_recomp_write16(machine, 0xdff096, 0x000f);
+        machine->cpu.sr &= 0xfff0;
+        return BS_RECOMP_OK;
+    }
+    snprintf(machine->error, sizeof machine->error,
+             "untranslated $3D80C music-stop vector $%06x", target);
+    return BS_RECOMP_UNTRANSLATED;
 }
 
 typedef struct {
@@ -5789,19 +5838,30 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
              * LAB_D52; otherwise the demo runs to its $0FA0-frame expiry and
              * fades back to the title at LAB_58A.  Both button reads alias to
              * CIA-A port A, whose inputs are active low. */
-            if (bs_recomp_read8(machine, machine->cpu.a[5] - 28516) != 0 &&
-                (bs_recomp_read8(machine, 0xbfe003) & 0x80) != 0 &&
-                (bs_recomp_read8(machine, 0xbfe001) & 0x40) != 0 &&
-                (int16_t)bs_recomp_read16(machine,
-                                           machine->cpu.a[5] - 28550) <
-                    0x0fa0) {
+            if (bs_recomp_read8(machine, machine->cpu.a[5] - 28516) == 0) {
+                /* LAB_D98.  Only LAB_DFA's normal live-game continuation is
+                 * translated; hardware quit buttons are a frontend concern and
+                 * the game-over/loading edges remain fail-closed. */
+                if (bs_recomp_read8(machine,
+                                    machine->cpu.a[5] - 4096) != 0) {
+                    snprintf(machine->error, sizeof machine->error,
+                             "untranslated game-over path at $000d16");
+                    return BS_RECOMP_UNTRANSLATED;
+                }
+                machine->cpu.sr =
+                    (uint16_t)((machine->cpu.sr & 0xffe0) | 0x04);
+                machine->cpu.pc = 0xaa0;
+            } else if ((bs_recomp_read8(machine, 0xbfe003) & 0x80) == 0 ||
+                       (bs_recomp_read8(machine, 0xbfe001) & 0x40) == 0) {
+                /* $D1E/$D28: either fire button starts a game. */
+                machine->cpu.pc = 0xd52;
+            } else if ((int16_t)bs_recomp_read16(machine,
+                                                 machine->cpu.a[5] - 28550) <
+                       0x0fa0) {
                 machine->cpu.sr =
                     (uint16_t)((machine->cpu.sr & 0xffe0) | 0x19);
                 machine->cpu.pc = 0xaa0;
-            } else if (bs_recomp_read8(machine,
-                                        machine->cpu.a[5] - 28516) != 0 &&
-                       (bs_recomp_read8(machine, 0xbfe003) & 0x80) != 0 &&
-                       (bs_recomp_read8(machine, 0xbfe001) & 0x40) != 0) {
+            } else {
                 /* $D3C-$D4E: the expired demo darkens its palette and
                  * restarts the title sequence at LAB_58A. */
                 bs_recomp_write32(machine, machine->cpu.a[5] + 13182,
@@ -5809,23 +5869,67 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
                 machine->cpu.a[1] = 0xb2a0;
                 darken_palette(machine);
                 machine->cpu.pc = 0x58a;
-            } else if (bs_recomp_read8(machine,
-                                        machine->cpu.a[5] - 28516) == 0 &&
-                       bs_recomp_read8(machine,
-                                       machine->cpu.a[5] - 4096) == 0) {
-                /* LAB_DFA's normal live-game continuation. Hardware quit
-                 * buttons are a frontend concern; game-over/loading remains
-                 * fail-closed when the state byte becomes non-zero. */
-                machine->cpu.sr =
-                    (uint16_t)((machine->cpu.sr & 0xffe0) | 0x04);
-                machine->cpu.pc = 0xaa0;
-            } else {
-                /* Remaining edges are LAB_D52's fire-to-start, which needs
-                 * the $926 new-game entry, and LAB_D98's game-over paths. */
-                snprintf(machine->error, sizeof machine->error,
-                         "untranslated demo-exit path at $000d16");
-                return BS_RECOMP_UNTRANSLATED;
             }
+            break;
+        /* LAB_D52.  A fire button during the attract demo stops the music,
+         * repoints the bitplanes at the title buffer, installs the gameplay
+         * overlays and starts a real game at $926. */
+        case 0xd52: {
+            int status = request_music_stop(machine);
+            if (status != BS_RECOMP_OK) return status;
+            machine->cpu.pc = 0xd58;
+            break;
+        }
+        case 0xd58:
+            machine->cpu.d[1] = 0xc8b6;
+            set_dreg_word(&machine->cpu.d[2], 0);
+            machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+            machine->cpu.pc = 0xd60;
+            break;
+        case 0xd60:
+            set_bitplane_pointers(machine);
+            machine->cpu.pc = 0xd64;
+            break;
+        case 0xd64: machine->cpu.a[4] = 0x1aa0; machine->cpu.pc = 0xd6a; break;
+        case 0xd6a:
+            if (load_module(machine, machine->cpu.a[4]))
+                return BS_RECOMP_ERROR;
+            machine->cpu.pc = 0xd6e;
+            break;
+        case 0xd6e:
+            bs_recomp_write8(machine, machine->cpu.a[5] - 26245, 0x81);
+            machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x08);
+            machine->cpu.pc = 0xd74;
+            break;
+        case 0xd74: machine->cpu.a[4] = 0x19f8; machine->cpu.pc = 0xd7a; break;
+        case 0xd7a:
+            if (load_module(machine, machine->cpu.a[4]))
+                return BS_RECOMP_ERROR;
+            machine->cpu.pc = 0xd7e;
+            break;
+        case 0xd7e: {
+            uint8_t value = (uint8_t)~bs_recomp_read8(machine,
+                                                      machine->cpu.a[5] - 26246);
+            bs_recomp_write8(machine, machine->cpu.a[5] - 26246, value);
+            machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) |
+                                         (value == 0 ? 0x04 : 0) |
+                                         (value & 0x80 ? 0x08 : 0));
+            machine->cpu.pc = 0xd82;
+            break;
+        }
+        case 0xd82:
+            bs_recomp_write32(machine, machine->cpu.a[5] + 13182, 0xfffffffe);
+            machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x08);
+            machine->cpu.pc = 0xd8a;
+            break;
+        case 0xd8a: machine->cpu.a[1] = 0xb2a0; machine->cpu.pc = 0xd90; break;
+        case 0xd90:
+            darken_palette(machine);
+            machine->cpu.pc = 0xd94;
+            break;
+        case 0xd94: machine->cpu.pc = 0x926; break;
+        case 0x926:
+            if (run_new_game_sequence(machine)) return BS_RECOMP_ERROR;
             break;
         default:
             machine->translated_steps--;
