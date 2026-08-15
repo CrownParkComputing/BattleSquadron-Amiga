@@ -298,6 +298,7 @@ int main(int argc, char **argv)
     int finished = 0;
     while (!WindowShouldClose()) {
         if (!finished) {
+            int advanced = 1;
             int fire = any_fire();
             if (stage == PRESENT_INTRO && stage_frame >= 90) {
                 if (!run_exact(machine, 46, 0x5f6, "title"))
@@ -346,7 +347,8 @@ int main(int argc, char **argv)
                  * speed, which also halved every animation's duration. */
                 static int logic_phase;
                 update_input(machine);
-                if (!(logic_phase++ & 1) &&
+                advanced = !(logic_phase++ & 1);
+                if (advanced &&
                     !run_game_display_frame(machine, clean_playfield))
                     finished = 1;
             }
@@ -355,11 +357,18 @@ int main(int argc, char **argv)
                 PlayAudioStream(stream);
                 audio_started = 1;
             }
-            source = video_source(machine);
-            pixels = ocs_video_render(video, &source);
-            UpdateTexture(texture, pixels);
-            if (stage == PRESENT_GAME)
-                memcpy(machine->memory + 0x62000, clean_playfield, 0x1e000);
+            /* The capture/restore pair only makes sense on a frame that ran
+             * the game.  Rendering a skipped frame would show the restored
+             * pre-object playfield and flicker the sprites off every other
+             * frame, and restoring it again would put a stale image back. */
+            if (advanced) {
+                source = video_source(machine);
+                pixels = ocs_video_render(video, &source);
+                UpdateTexture(texture, pixels);
+                if (stage == PRESENT_GAME)
+                    memcpy(machine->memory + 0x62000, clean_playfield,
+                           0x1e000);
+            }
         }
         BeginDrawing();
         ClearBackground(BLACK);

@@ -2023,6 +2023,11 @@ reprocess_projectile:
                                  * record has its pass flag cleared again. */
                                 goto reprocess_projectile;
                             }
+                            /* Any other count frees the record, exactly as a
+                             * non-zero type does.  Leaving it alive stranded
+                             * the finished explosion on screen. */
+                            bs_recomp_write16(machine, projectile, 0);
+                            goto next_projectile;
                         }
                     }
                     /* LAB_9814 draws it from the explosion's own graphics. */
