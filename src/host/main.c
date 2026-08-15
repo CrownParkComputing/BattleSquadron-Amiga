@@ -73,6 +73,7 @@ int main(int argc, char **argv)
     const char *dump = NULL;
     bool mix_audio = false;
     bool autofire = false;
+    long dump_state = 0;
     const char *audio_dump_path = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -92,6 +93,8 @@ int main(int argc, char **argv)
             dump = argv[++i];
         } else if (!strcmp(argv[i], "--mix-audio")) {
             mix_audio = true;
+        } else if (!strcmp(argv[i], "--dump-state") && i + 1 < argc) {
+            dump_state = parse_frames(argv[++i]);
         } else if (!strcmp(argv[i], "--autofire")) {
             autofire = true;
         } else if (!strcmp(argv[i], "--dump-audio") && i + 1 < argc) {
@@ -108,7 +111,7 @@ int main(int argc, char **argv)
                     "usage: %s [--data DIR] [--frames N] "
                     "[--expect-files N] [--expect-blits N] "
                     "[--video|--video-from N] [--dump-frame FILE] "
-                    "[--mix-audio] [--dump-audio FILE] [--autofire] "
+                    "[--mix-audio] [--dump-audio FILE] [--autofire] [--dump-state N] "
                     "[--selftest]\n",
                     argv[0]);
             return 2;
@@ -129,6 +132,31 @@ int main(int argc, char **argv)
         if (video_from >= 0 && bs_frame_no >= video_from)
             amiga_enable_video(true);
         amiga_run_frame();
+        if (dump_state && bs_frame_no % dump_state == 0) {
+            /* Reference values for the recompilation to diff against: the
+             * player record and every live active-object slot. */
+            printf("state frame=%ld p1 x=%u y=%u s38=%u c48=%u d49=%u "
+                   "inv52=%u lives56=%u wpn60=%u\n",
+                   bs_frame_no,
+                   (chip[0x4e40] << 8) | chip[0x4e41],
+                   (chip[0x4e42] << 8) | chip[0x4e43],
+                   chip[0x4e3c + 38], chip[0x4e3c + 48], chip[0x4e3c + 49],
+                   (chip[0x4e3c + 52] << 8) | chip[0x4e3c + 53],
+                   chip[0x4e3c + 56],
+                   (chip[0x4e3c + 60] << 8) | chip[0x4e3c + 61]);
+            for (unsigned slot = 0; slot < 18; slot++) {
+                unsigned object = 0x2e040 + slot * 0x50;
+                unsigned x = (chip[object] << 8) | chip[object + 1];
+                if (!x) continue;
+                printf("  obj %2u x=%4u y=%4u type=$%02X limit19=%3u "
+                       "state25=%3u health28=%3u status30=%3u final33=%3u\n",
+                       slot, x, (chip[object + 2] << 8) | chip[object + 3],
+                       chip[object + 17], chip[object + 19],
+                       chip[object + 25], chip[object + 28],
+                       chip[object + 30], chip[object + 33]);
+            }
+            fflush(stdout);
+        }
         if (mix_audio) {
             int16_t audio[882 * 2];
             amiga_audio_frame();
