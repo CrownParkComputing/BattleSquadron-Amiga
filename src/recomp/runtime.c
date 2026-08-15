@@ -3617,9 +3617,14 @@ static int build_respawning_ship_records(BsRecomp *machine,
     }
 
     if (bs_recomp_read8(machine, player + 38) >= 0xc8) {
-        snprintf(machine->error, sizeof machine->error,
-                 "untranslated dying ship record at $%06x", player);
-        return BS_RECOMP_UNTRANSLATED;
+        /* $53B8 into LAB_543E: a finished player contributes no records, so
+         * both sprite lists are just terminated. */
+        bs_recomp_write32(machine, machine->cpu.a[1], 0);
+        uint32_t swap = machine->cpu.a[1];
+        machine->cpu.a[1] = machine->cpu.a[2];
+        machine->cpu.a[2] = swap;
+        bs_recomp_write32(machine, machine->cpu.a[1], 0);
+        return BS_RECOMP_OK;
     }
     machine->cpu.d[0] = 11;
     for (int slot = 0; slot < 12; slot++) {

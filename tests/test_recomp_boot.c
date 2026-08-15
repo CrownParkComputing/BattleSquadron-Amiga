@@ -1024,14 +1024,15 @@ int main(void)
      * three lives instead of leaving a permanently dead ship, so it no longer
      * reaches 8000 frames.  It stops at the game-over record path, which is
      * the next thing to translate. */
+    /* The demo now plays through deaths, respawns, cleared waves and game
+     * over without reaching an untranslated edge. */
     result = bs_recomp_run(machine, 1000000);
-    CHECK(result == BS_RECOMP_UNTRANSLATED && machine->cpu.pc == 0xcb2 &&
-          machine->translated_steps == 53675,
-          "recorded demo did not stop at the game-over record path");
-    CHECK(bs_recomp_read8(machine, 0x4e3c + 38) >= 0xc8,
-          "recorded demo stopped without the player reaching game over");
-    fprintf(stderr, "recorded demo: %ld steps, stopped at $%06x (%s)\n",
-            (long)machine->translated_steps, machine->cpu.pc, machine->error);
+    CHECK(result == BS_RECOMP_OK,
+          "recorded demo reached an untranslated edge");
+    CHECK(bs_recomp_read16(machine, 0x1078) > 0x1f40,
+          "recorded demo did not keep advancing its terrain");
+    fprintf(stderr, "recorded demo: %ld steps, no untranslated edge\n",
+            (long)machine->translated_steps);
 
     /* The demo-exit and fire-to-start paths are driven on a second machine,
      * early enough in the demo that its lives are still intact. */
@@ -1147,8 +1148,8 @@ int main(void)
         CHECK(deaths == 3 && respawns == 3 &&
               bs_recomp_read8(start, 0x4e3c + 56) == 0,
               "the ship did not explode and respawn through its three lives");
-        CHECK(result == BS_RECOMP_UNTRANSLATED && start->cpu.pc == 0xcb2,
-              "the exhausted game did not stop at the game-over record path");
+        CHECK(result == BS_RECOMP_OK,
+              "the live game reached an untranslated edge");
         fprintf(stderr,
                 "live game: %d deaths, %d respawns, %ld steps, stopped at "
                 "$%06x\n", deaths, respawns, (long)start->translated_steps,
