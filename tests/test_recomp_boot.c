@@ -78,6 +78,87 @@ static int projectile_cookie_cut_test(void)
     return passed;
 }
 
+/* Drives one pass of the $B54 active-object pool over a hand-built object. */
+static void step_object_pool(BsRecomp *fixture)
+{
+    fixture->cpu.pc = 0xb54;
+    bs_recomp_run(fixture, 1);
+}
+
+/* An object that takes fatal damage must run its death animation from the
+ * live limit up to its final frame and then be completed, not left sitting on
+ * the last frame forever. */
+static int object_death_animation_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    const uint32_t base = 0x8000;
+    const uint32_t object = 0x2e040;
+    fixture->cpu.a[5] = base;
+    fixture->cpu.a[6] = 0xdff000;
+    bs_recomp_write16(fixture, base + 7228, 0);     /* mode zero */
+    bs_recomp_write16(fixture, base + 7222, 0);     /* no scroll advance */
+    bs_recomp_write8(fixture, base - 28551, 0);     /* animation gate open */
+
+    bs_recomp_write16(fixture, object, 0x0080);
+    bs_recomp_write16(fixture, object + 2, 0x0140);
+    bs_recomp_write16(fixture, object + 6, 0x0010);
+    bs_recomp_write8(fixture, object + 17, 0x20);   /* type */
+    bs_recomp_write8(fixture, object + 19, 4);      /* live limit */
+    bs_recomp_write8(fixture, object + 28, 3);      /* health */
+    bs_recomp_write8(fixture, object + 33, 9);      /* final frame */
+
+    /* Fatal damage parks the object on its live limit and flags it. */
+    bs_recomp_write8(fixture, object + 24, 5);
+    step_object_pool(fixture);
+    int passed = bs_recomp_read8(fixture, object + 25) == 4 &&
+                 (bs_recomp_read8(fixture, object + 31) & 0x04) != 0 &&
+                 bs_recomp_read16(fixture, object) != 0;
+
+    /* The animation then advances one frame per pass up to the final one. */
+    for (int frame = 5; frame <= 9 && passed; frame++) {
+        step_object_pool(fixture);
+        passed = bs_recomp_read8(fixture, object + 25) == frame;
+    }
+
+    /* On the final frame a player sitting on the wreck collects it: the BCD
+     * bonus advances, the wreck moves one state past its last frame. */
+    if (passed) {
+        bs_recomp_write8(fixture, 0x4e3c + 38, 0);
+        bs_recomp_write16(fixture, 0x4e3c + 4, 0x0080);
+        bs_recomp_write16(fixture, 0x4e3c + 6, 0x0140);
+        bs_recomp_write8(fixture, 0x4e3c + 97, 0x09);
+        bs_recomp_write8(fixture, 0x4f46 + 38, 0xff);
+        step_object_pool(fixture);
+        passed = bs_recomp_read8(fixture, 0x4e3c + 97) == 0x10 &&
+                 bs_recomp_read8(fixture, object + 25) == 10;
+    }
+
+    /* An uncollected wreck must not advance past its final frame. */
+    if (passed) {
+        BsRecomp *idle = calloc(1, sizeof *idle);
+        if (!idle) { free(fixture); return 0; }
+        idle->cpu.a[5] = base;
+        idle->cpu.a[6] = 0xdff000;
+        bs_recomp_write8(idle, base - 28551, 0);
+        bs_recomp_write16(idle, object, 0x0080);
+        bs_recomp_write16(idle, object + 2, 0x0140);
+        bs_recomp_write16(idle, object + 6, 0x0010);
+        bs_recomp_write8(idle, object + 17, 0x20);
+        bs_recomp_write8(idle, object + 19, 4);
+        bs_recomp_write8(idle, object + 25, 9);
+        bs_recomp_write8(idle, object + 33, 9);
+        bs_recomp_write8(idle, 0x4e3c + 38, 0xff);
+        bs_recomp_write8(idle, 0x4f46 + 38, 0xff);
+        step_object_pool(idle);
+        passed = bs_recomp_read8(idle, object + 25) == 9;
+        free(idle);
+    }
+
+    free(fixture);
+    return passed;
+}
+
 static int collision_pass_test(void)
 {
     BsRecomp *fixture = calloc(1, sizeof *fixture);
@@ -228,6 +309,8 @@ int main(void)
           "native projectile cookie-cut compositor failed");
     CHECK(collision_pass_test(),
           "native collision/damage/pickup passes failed");
+    CHECK(object_death_animation_test(),
+          "object death animation/completion failed");
     CHECK(live_input_test(),
           "live two-player input mapping/continuation failed");
     bs_recomp_set_audio_sample_hook(machine, capture_audio_sample, NULL);
