@@ -933,128 +933,142 @@ int main(void)
           "scheduled-projectile script cursor did not advance");
     CHECK(fnv1a(machine->memory + 0x2dff0, 0x50) == UINT32_C(0x0870b440),
           "scheduled enemy projectile record differs from oracle");
-    /* The recorded combat run still reaches the demo-exit edge at exactly the
-     * same step, which pins every translation it passes through. */
-    result = bs_recomp_run(machine, 221418 - 8309);
-    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0xd16 &&
-          machine->translated_steps == 221418 &&
-          bs_recomp_read16(machine, 0x1078) == 0x1f40,
-          "full recorded combat run did not reach the demo-exit edge");
-    fprintf(stderr,
-            "recorded combat: 8000 frames, 221418 translated steps, "
-            "demo-exit edge=$%06x\n", machine->cpu.pc);
+    /* With the death animation translated the attract demo now spends its
+     * three lives instead of leaving a permanently dead ship, so it no longer
+     * reaches 8000 frames.  It stops at the game-over record path, which is
+     * the next thing to translate. */
+    result = bs_recomp_run(machine, 1000000);
+    CHECK(result == BS_RECOMP_UNTRANSLATED && machine->cpu.pc == 0xcb2 &&
+          machine->translated_steps == 53025,
+          "recorded demo did not stop at the game-over record path");
+    CHECK(bs_recomp_read8(machine, 0x4e3c + 38) >= 0xc8,
+          "recorded demo stopped without the player reaching game over");
+    fprintf(stderr, "recorded demo: %ld steps, stopped at $%06x (%s)\n",
+            (long)machine->translated_steps, machine->cpu.pc, machine->error);
 
-    /* $D16 with both fire buttons released and the demo counter at its $0FA0
-     * expiry takes the $D3C fade back into the title sequence at LAB_58A. */
-    CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) != 0 &&
-          bs_recomp_read16(machine, machine->cpu.a[5] - 28550) == 0x0fa0 &&
-          machine->ciaa[0] == 0xff,
-          "demo-exit edge was not reached in the expired-demo state");
-    result = bs_recomp_run(machine, 1);
-    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0x58a &&
-          machine->translated_steps == 221419 &&
-          bs_recomp_read32(machine, machine->cpu.a[5] + 13182) == 0xfffffffe &&
-          machine->cpu.a[1] == 0xb2a0 &&
-          (machine->cpu.sr & 0x1f) == 0x10,
-          "expired demo did not take the $D3C title-restart path");
-    /* The fade leaves every copper colour entry black. */
-    int faded = 1;
-    for (unsigned entry = 0; entry < 32; entry++)
-        faded &= (bs_recomp_read16(machine, 0xb2a0 + entry * 4) & 0x0fff) == 0;
-    CHECK(faded, "demo-exit fade did not darken the palette to black");
+    /* The demo-exit and fire-to-start paths are driven on a second machine,
+     * early enough in the demo that its lives are still intact. */
+    BsRecomp *demo = calloc(1, sizeof *demo);
+    CHECK(demo != NULL, "could not allocate the demo-exit fixture");
+    if (demo && bs_recomp_init(demo,
+            "original/whdload/BattleSquadron/data") == BS_RECOMP_OK) {
+        result = bs_recomp_run(demo, 20000);
+        CHECK(result == BS_RECOMP_OK, "demo fixture did not reach the demo");
+        for (long guard = 0; guard < 4000 && demo->cpu.pc != 0xd16; guard++)
+            if ((result = bs_recomp_run(demo, 1)) != BS_RECOMP_OK) break;
+        CHECK(result == BS_RECOMP_OK && demo->cpu.pc == 0xd16 &&
+              bs_recomp_read8(demo, demo->cpu.a[5] - 28516) != 0 &&
+              demo->ciaa[0] == 0xff,
+              "demo fixture did not reach a $D16 edge in the demo state");
 
-    /* With the demo exit closed, the attract cycle runs title -> demo ->
-     * title without reaching an untranslated edge. */
-    result = bs_recomp_run(machine, 400000);
-    CHECK(result == BS_RECOMP_OK,
-          "attract cycle reached an untranslated edge after the demo exit");
-    CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) != 0,
-          "attract cycle did not return to demo mode");
-    fprintf(stderr, "attract cycle: %ld steps, no untranslated edge\n",
-            (long)machine->translated_steps);
-
-    /* Holding a fire button through the attract demo takes LAB_D52's
-     * fire-to-start path.  This drives it the way a frontend does, through the
-     * public input API, which must reach CIA-A port A bit 7 for player one. */
-    bs_recomp_set_input(machine, 0, BS_INPUT_FIRE);
-    CHECK(machine->ciaa[0] == 0x7f,
-          "player-one fire did not reach CIA-A port A bit 7");
-    int reached_start = 0;
-    for (long guard = 0; guard < 400000 && !reached_start; guard++) {
-        result = bs_recomp_run(machine, 1);
-        if (result != BS_RECOMP_OK) break;
-        if (machine->cpu.pc == 0xd52) reached_start = 1;
+        /* $D16 with both fire buttons released and the demo counter at its
+         * $0FA0 expiry takes the $D3C fade back into the title at LAB_58A. */
+        bs_recomp_write16(demo, demo->cpu.a[5] - 28550, 0x0fa0);
+        result = bs_recomp_run(demo, 1);
+        CHECK(result == BS_RECOMP_OK && demo->cpu.pc == 0x58a &&
+              bs_recomp_read32(demo, demo->cpu.a[5] + 13182) == 0xfffffffe &&
+              demo->cpu.a[1] == 0xb2a0 && (demo->cpu.sr & 0x1f) == 0x10,
+              "expired demo did not take the $D3C title-restart path");
+        int faded = 1;
+        for (unsigned entry = 0; entry < 32; entry++)
+            faded &= (bs_recomp_read16(demo, 0xb2a0 + entry * 4) & 0x0fff) == 0;
+        CHECK(faded, "demo-exit fade did not darken the palette to black");
+        free(demo);
     }
-    CHECK(result == BS_RECOMP_OK && reached_start,
-          "held fire button did not reach LAB_D52 from the attract demo");
 
-    /* LODCOM and LODMUS share the $3D800 load address, so the resident jump
-     * at $3D80C decides which music-stop routine $D52 actually calls.  LODMUS
-     * is the driver running the attract demo. */
-    CHECK(bs_recomp_read16(machine, 0x3d80c) == 0x4ef9 &&
-          bs_recomp_read32(machine, 0x3d80e) == 0x0003dce4,
-          "the resident $3D80C entry is not LODMUS's music-stop jump");
-    /* DMACON and INTENA take Amiga set/clear writes, so the routine's raw
-     * $000F and $C000 land as cleared audio channels and a restored master
-     * interrupt enable.  The audio channels are already idle here because the
-     * LODMUS sequencer itself is not translated yet, so this pins the register
-     * effects rather than an audible stop. */
-    result = bs_recomp_run(machine, 1);
-    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0xd58 &&
-          (bs_recomp_read16(machine, 0xdff096) & 0x000f) == 0 &&
-          (bs_recomp_read16(machine, 0xdff09a) & 0x4000) != 0 &&
-          bs_recomp_read8(machine, 0xbfde00) == 0,
-          "fire-to-start did not stop the LODMUS timer and audio DMA");
+    /* Fire-to-start, driven the way a frontend does: through the public input
+     * API, which must reach CIA-A port A bit 7 for player one. */
+    BsRecomp *start = calloc(1, sizeof *start);
+    CHECK(start != NULL, "could not allocate the fire-to-start fixture");
+    if (start && bs_recomp_init(start,
+            "original/whdload/BattleSquadron/data") == BS_RECOMP_OK) {
+        result = bs_recomp_run(start, 20000);
+        bs_recomp_set_input(start, 0, BS_INPUT_FIRE);
+        CHECK(start->ciaa[0] == 0x7f,
+              "player-one fire did not reach CIA-A port A bit 7");
+        int reached = 0;
+        for (long guard = 0; guard < 20000 && !reached; guard++) {
+            if ((result = bs_recomp_run(start, 1)) != BS_RECOMP_OK) break;
+            if (start->cpu.pc == 0xd52) reached = 1;
+        }
+        CHECK(result == BS_RECOMP_OK && reached,
+              "held fire button did not reach LAB_D52 from the attract demo");
 
-    /* The rest of $D52-$D94 is twelve dispatch steps and $926 completes the
-     * new-game sequence, leaving the live game at its $AA0 frame edge.  The
-     * $D6A overlay load replaces the driver that owns the stop request. */
-    result = bs_recomp_run(machine, 13);
-    CHECK(result == BS_RECOMP_OK && machine->cpu.pc == 0xaa0,
-          "fire-to-start did not complete the $926 new-game sequence");
-    CHECK(bs_recomp_read8(machine, machine->cpu.a[5] - 28516) == 0,
-          "fire-to-start left the attract-demo flag set");
+        /* LODCOM and LODMUS share the $3D800 load address, so the resident
+         * jump at $3D80C decides which music-stop routine $D52 calls. */
+        CHECK(bs_recomp_read16(start, 0x3d80c) == 0x4ef9 &&
+              bs_recomp_read32(start, 0x3d80e) == 0x0003dce4,
+              "the resident $3D80C entry is not LODMUS's music-stop jump");
+        result = bs_recomp_run(start, 1);
+        CHECK(result == BS_RECOMP_OK && start->cpu.pc == 0xd58 &&
+              (bs_recomp_read16(start, 0xdff096) & 0x000f) == 0 &&
+              (bs_recomp_read16(start, 0xdff09a) & 0x4000) != 0 &&
+              bs_recomp_read8(start, 0xbfde00) == 0,
+              "fire-to-start did not stop the LODMUS timer and audio DMA");
 
-    /* $A56 brings up LODGAM's audio system: CIA-B timer A armed at its $31
-     * period with the timer interrupt enabled, the handler vector installed,
-     * and all four audio DMA channels enabled. */
-    CHECK(bs_recomp_read8(machine, 0xbfd500) == 0x31 &&
-          bs_recomp_read8(machine, 0xbfde00) == 0x11 &&
-          bs_recomp_read8(machine, 0xbfdd00) == 0x81 &&
-          bs_recomp_read32(machine, 0x000008) == 0x00024f34,
-          "the gameplay audio system did not arm the CIA-B sequencer timer");
-    CHECK((bs_recomp_read16(machine, 0xdff096) & 0x000f) == 0x000f,
-          "the gameplay audio system did not enable the audio DMA channels");
-    /* Each channel is seeded from its descriptor with the volume silenced. */
-    for (unsigned channel = 0; channel < 4; channel++) {
-        uint32_t state = 0x252a4 + channel * 0x3e;
-        uint32_t paula = bs_recomp_read32(machine, state);
-        CHECK(paula == 0xdff0a0 + channel * 0x10 &&
-              bs_recomp_read16(machine, paula + 8) == 0 &&
-              bs_recomp_read32(machine, state + 4) == 0x25504 &&
-              bs_recomp_read32(machine, state + 0x0c) ==
-                  bs_recomp_read32(machine, state + 8) &&
-              bs_recomp_read8(machine, state + 0x3a) == 1,
-              "a gameplay audio channel was not initialised from $25504");
+        result = bs_recomp_run(start, 13);
+        CHECK(result == BS_RECOMP_OK && start->cpu.pc == 0xaa0,
+              "fire-to-start did not complete the $926 new-game sequence");
+        CHECK(bs_recomp_read8(start, start->cpu.a[5] - 28516) == 0,
+              "fire-to-start left the attract-demo flag set");
+        CHECK(bs_recomp_read32(start, start->cpu.a[5] + 13182) == 0xfffffffe &&
+              bs_recomp_read8(start, start->cpu.a[5] - 26245) == 0x01,
+              "fire-to-start new-game state differs from the title entry");
+
+        /* $A56 brings up LODGAM's audio system. */
+        CHECK(bs_recomp_read8(start, 0xbfd500) == 0x31 &&
+              bs_recomp_read8(start, 0xbfde00) == 0x11 &&
+              bs_recomp_read8(start, 0xbfdd00) == 0x81 &&
+              bs_recomp_read32(start, 0x000008) == 0x00024f34,
+              "the gameplay audio system did not arm the CIA-B timer");
+        CHECK((bs_recomp_read16(start, 0xdff096) & 0x000f) == 0x000f,
+              "the gameplay audio system did not enable the audio DMA");
+        for (unsigned channel = 0; channel < 4; channel++) {
+            uint32_t state = 0x252a4 + channel * 0x3e;
+            uint32_t paula = bs_recomp_read32(start, state);
+            CHECK(paula == 0xdff0a0 + channel * 0x10 &&
+                  bs_recomp_read16(start, paula + 8) == 0 &&
+                  bs_recomp_read32(start, state + 4) == 0x25504 &&
+                  bs_recomp_read32(start, state + 0x0c) ==
+                      bs_recomp_read32(start, state + 8) &&
+                  bs_recomp_read8(start, state + 0x3a) == 1,
+                  "a gameplay audio channel was not initialised from $25504");
+        }
+        CHECK(bs_recomp_read8(start, 0x251f8) == 1 &&
+              bs_recomp_read16(start, 0x251f8 + 8) == 1 &&
+              bs_recomp_read16(start, 0x251f8 + 10) == 0,
+              "the audio system did not latch a request for track one");
+
+        /* The started game runs as a live game whose ship explodes and
+         * respawns instead of staying dead.  Three deaths consume the three
+         * lives and the game then reaches its untranslated game-over path. */
+        CHECK(bs_recomp_read8(start, start->cpu.a[5] - 28516) == 0,
+              "fire-to-start game did not run on as a live game");
+        bs_recomp_set_input(start, 0, 0);
+        bs_recomp_enable_live_input(start, 1);
+        uint8_t was_dying = 0, was_respawning = 0;
+        int deaths = 0, respawns = 0;
+        for (long step = 0; step < 400000; step++) {
+            if ((result = bs_recomp_run(start, 1)) != BS_RECOMP_OK) break;
+            uint8_t dying = bs_recomp_read8(start, 0x4e3c + 49);
+            uint8_t respawning = bs_recomp_read8(start, 0x4e3c + 48);
+            if (dying != 0 && was_dying == 0) deaths++;
+            if (respawning == 0x91 && was_respawning != 0x91) respawns++;
+            was_dying = dying;
+            was_respawning = respawning;
+        }
+        CHECK(deaths == 3 && respawns == 3 &&
+              bs_recomp_read8(start, 0x4e3c + 56) == 0,
+              "the ship did not explode and respawn through its three lives");
+        CHECK(result == BS_RECOMP_UNTRANSLATED && start->cpu.pc == 0xcb2,
+              "the exhausted game did not stop at the game-over record path");
+        fprintf(stderr,
+                "live game: %d deaths, %d respawns, %ld steps, stopped at "
+                "$%06x\n", deaths, respawns, (long)start->translated_steps,
+                start->cpu.pc);
+        free(start);
     }
-    /* $A5C asks for track one, which latches as a pending request the
-     * not-yet-dispatched timer interrupt would act on. */
-    CHECK(bs_recomp_read8(machine, 0x251f8) == 1 &&
-          bs_recomp_read16(machine, 0x251f8 + 8) == 1 &&
-          bs_recomp_read16(machine, 0x251f8 + 10) == 0,
-          "the gameplay audio system did not latch a request for track one");
-    CHECK(bs_recomp_read32(machine, machine->cpu.a[5] + 13182) == 0xfffffffe &&
-          bs_recomp_read8(machine, machine->cpu.a[5] - 26245) == 0x01,
-          "fire-to-start new-game state differs from the title entry");
 
-    /* The started game then runs as a live game, not a demo. */
-    result = bs_recomp_run(machine, 200000);
-    CHECK(result == BS_RECOMP_OK &&
-          bs_recomp_read8(machine, machine->cpu.a[5] - 28516) == 0,
-          "fire-to-start game did not run on as a live game");
-    fprintf(stderr, "fire-to-start: reached $AA0, %ld steps total\n",
-            (long)machine->translated_steps);
-    bs_recomp_set_input(machine, 0, 0);
     uint32_t translated_pc = machine->cpu.pc;
     machine->cpu.pc = 0x00dead;
     result = bs_recomp_run(machine, 1);
