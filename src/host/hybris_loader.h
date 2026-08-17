@@ -13,4 +13,16 @@ extern long hybris_load_bytes;
 extern long hybris_action_key;
 extern long hybris_action_pot;
 
+/* Remastered artwork found in assets/sprites.  A file named after the blit
+ * source it replaces -- 018620.png, or 018620-0188a0.png for an explicit
+ * range -- is registered automatically, so adding art needs no code and no
+ * manifest.  The frontend loads these paths and draws them by id. */
+typedef struct {
+    int  id;
+    char path[256];
+} HybrisSpriteArt;
+
+extern HybrisSpriteArt hybris_sprite_art[32];
+extern int hybris_sprite_art_count;
+
 #endif

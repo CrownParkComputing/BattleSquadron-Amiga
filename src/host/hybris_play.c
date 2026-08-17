@@ -228,8 +228,11 @@ int main(int argc, char **argv)
     /* Remastered artwork, drawn over the frame wherever the game would have
      * blitted the original.  24-bit with alpha, at higher resolution than the
      * Amiga could hold. */
-    Texture2D alien = LoadTexture("assets/sprites/alien.png");
-    if (alien.id) SetTextureFilter(alien, TEXTURE_FILTER_BILINEAR);
+    Texture2D art[32] = {0};
+    for (int i = 0; i < hybris_sprite_art_count && i < 32; i++) {
+        art[i] = LoadTexture(hybris_sprite_art[i].path);
+        if (art[i].id) SetTextureFilter(art[i], TEXTURE_FILTER_BILINEAR);
+    }
 
     if (load_track("assets/battle-squadron-theme.wav"))
         fprintf(stderr, "alternative soundtrack: %.1fs loaded (L1 toggles)\n",
@@ -335,14 +338,16 @@ int main(int argc, char **argv)
         DrawTexturePro(texture, (Rectangle){0, 0, SCREEN_W, SCREEN_H},
                        where, (Vector2){0, 0}, 0, WHITE);
         /* Replacement sprites: one request per object the game drew. */
-        if (alien.id) {
+        {
             float sx = where.width / (float)SCREEN_W;
             float sy = where.height / (float)SCREEN_H;
             for (int i = 0; i < bs_sprite_draw_count; i++) {
                 const BsSpriteDraw *d = &bs_sprite_draws[i];
-                if (d->id != 0) continue;
-                DrawTexturePro(alien,
-                    (Rectangle){0, 0, (float)alien.width, (float)alien.height},
+                int slot = d->id - 1;
+                if (slot < 0 || slot >= 32 || !art[slot].id) continue;
+                DrawTexturePro(art[slot],
+                    (Rectangle){0, 0, (float)art[slot].width,
+                                (float)art[slot].height},
                     (Rectangle){where.x + d->x * sx, where.y + d->y * sy,
                                 d->width * sx, d->height * sy},
                     (Vector2){0, 0}, 0, WHITE);
@@ -389,7 +394,8 @@ int main(int argc, char **argv)
     CloseAudioDevice();
     UnloadTexture(texture);
     if (logo.id) UnloadTexture(logo);
-    if (alien.id) UnloadTexture(alien);
+    for (int i = 0; i < hybris_sprite_art_count && i < 32; i++)
+        if (art[i].id) UnloadTexture(art[i]);
     CloseWindow();
     printf("hybris: %ld frames, %ld file loads (%ld bytes)\n",
            bs_frame_no, hybris_load_count, hybris_load_bytes);

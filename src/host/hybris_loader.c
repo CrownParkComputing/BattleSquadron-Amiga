@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 
 /* Intercept the cracked loader's trackloader and serve files instead.
  *
@@ -150,11 +151,45 @@ static void resign_loader(void)
 #define ALIEN_ART_HIGH  0x0188a0
 #define ALIEN_ID        0
 
+HybrisSpriteArt hybris_sprite_art[32];
+int hybris_sprite_art_count;
+
+/* One 5-plane frame is 640 bytes; a bare address claims the three animation
+ * frames that normally follow it. */
+#define FRAME_BYTES 640
+#define DEFAULT_FRAMES 3
+
+static void load_sprite_folder(const char *folder)
+{
+    DIR *dir = opendir(folder);
+    if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        unsigned low = 0, high = 0;
+        int matched = sscanf(entry->d_name, "%x-%x", &low, &high);
+        if (matched < 1 || !low) continue;
+        if (!strstr(entry->d_name, ".png")) continue;
+        if (matched == 1) high = low + FRAME_BYTES * DEFAULT_FRAMES;
+        if (hybris_sprite_art_count ==
+            (int)(sizeof hybris_sprite_art / sizeof *hybris_sprite_art))
+            break;
+        HybrisSpriteArt *art = &hybris_sprite_art[hybris_sprite_art_count];
+        art->id = hybris_sprite_art_count + 1;      /* 0 means "unclaimed" */
+        snprintf(art->path, sizeof art->path, "%s/%s", folder, entry->d_name);
+        amiga_register_replacement(low, high, art->id);
+        fprintf(stderr, "hybris: %s replaces $%06x-$%06x\n", art->path,
+                low, high);
+        hybris_sprite_art_count++;
+    }
+    closedir(dir);
+}
+
 bool hybris_loader_install(const char *directory)
 {
     if (!hybris_files_load(directory)) return false;
     if (getenv("HYBRIS_REMASTER"))
-        amiga_register_replacement(ALIEN_ART_LOW, ALIEN_ART_HIGH, ALIEN_ID);
+        load_sprite_folder(getenv("HYBRIS_SPRITES") ? getenv("HYBRIS_SPRITES")
+                                                    : "assets/sprites");
     if (getenv("HYBRIS_IDENTIFY")) {
         /* Claim everything, suppress nothing: every object reports the
          * address that drew it, against a picture that still looks normal. */
