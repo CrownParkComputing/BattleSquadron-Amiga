@@ -15,11 +15,14 @@ endif()
 add_subdirectory("${RAYLIB_DIR}" "${CMAKE_BINARY_DIR}/raylib" EXCLUDE_FROM_ALL)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
-set(MUSASHI_DIR "${REPO_ROOT}/../SWIV/src/musashi")
+# Musashi lives beside this tree; ../SWIV was a path from an older layout
+set(MUSASHI_DIR "$ENV{HOME}/BattleSquadron/src/musashi")
 
 add_library(main SHARED
     "${REPO_ROOT}/src/host/frontend.c"
+    "${REPO_ROOT}/src/host/pad.c"
     "${REPO_ROOT}/src/host/amiga.c"
+    "${REPO_ROOT}/src/host/whdload.c"
     "${MUSASHI_DIR}/m68kcpu.c"
     "${MUSASHI_DIR}/m68kops.c"
     "${MUSASHI_DIR}/m68kdasm.c"

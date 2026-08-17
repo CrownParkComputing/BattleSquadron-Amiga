@@ -54,7 +54,17 @@ build CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/frontend.c.o: C
   DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
   DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/frontend.c.o.d
   FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
-  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron-Amiga/../SWIV/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  OBJECT_DIR = CMakeFiles/main.dir
+  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host
+  TARGET_SUPPORT_DIR = CMakeFiles/main.dir
+
+build CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/pad.c.o: C_COMPILER__main_unscanned_Debug /home/jon/BattleSquadron-Amiga/src/host/pad.c || cmake_object_order_depends_target_main
+  CONFIG = Debug
+  DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
+  DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/pad.c.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
   OBJECT_DIR = CMakeFiles/main.dir
   OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host
   TARGET_SUPPORT_DIR = CMakeFiles/main.dir
@@ -64,49 +74,59 @@ build CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/amiga.c.o: C_CO
   DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
   DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/amiga.c.o.d
   FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
-  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron-Amiga/../SWIV/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
   OBJECT_DIR = CMakeFiles/main.dir
   OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host
   TARGET_SUPPORT_DIR = CMakeFiles/main.dir
 
-build CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kcpu.c.o: C_COMPILER__main_unscanned_Debug /home/jon/SWIV/src/musashi/m68kcpu.c || cmake_object_order_depends_target_main
+build CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/whdload.c.o: C_COMPILER__main_unscanned_Debug /home/jon/BattleSquadron-Amiga/src/host/whdload.c || cmake_object_order_depends_target_main
   CONFIG = Debug
   DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
-  DEP_FILE = CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kcpu.c.o.d
+  DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/whdload.c.o.d
   FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
-  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron-Amiga/../SWIV/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
   OBJECT_DIR = CMakeFiles/main.dir
-  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/SWIV/src/musashi
+  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host
   TARGET_SUPPORT_DIR = CMakeFiles/main.dir
 
-build CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kops.c.o: C_COMPILER__main_unscanned_Debug /home/jon/SWIV/src/musashi/m68kops.c || cmake_object_order_depends_target_main
+build CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kcpu.c.o: C_COMPILER__main_unscanned_Debug /home/jon/BattleSquadron/src/musashi/m68kcpu.c || cmake_object_order_depends_target_main
   CONFIG = Debug
   DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
-  DEP_FILE = CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kops.c.o.d
+  DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kcpu.c.o.d
   FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
-  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron-Amiga/../SWIV/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
   OBJECT_DIR = CMakeFiles/main.dir
-  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/SWIV/src/musashi
+  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi
   TARGET_SUPPORT_DIR = CMakeFiles/main.dir
 
-build CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kdasm.c.o: C_COMPILER__main_unscanned_Debug /home/jon/SWIV/src/musashi/m68kdasm.c || cmake_object_order_depends_target_main
+build CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kops.c.o: C_COMPILER__main_unscanned_Debug /home/jon/BattleSquadron/src/musashi/m68kops.c || cmake_object_order_depends_target_main
   CONFIG = Debug
   DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
-  DEP_FILE = CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kdasm.c.o.d
+  DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kops.c.o.d
   FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
-  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron-Amiga/../SWIV/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
   OBJECT_DIR = CMakeFiles/main.dir
-  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/SWIV/src/musashi
+  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi
   TARGET_SUPPORT_DIR = CMakeFiles/main.dir
 
-build CMakeFiles/main.dir/home/jon/SWIV/src/musashi/softfloat/softfloat.c.o: C_COMPILER__main_unscanned_Debug /home/jon/SWIV/src/musashi/softfloat/softfloat.c || cmake_object_order_depends_target_main
+build CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kdasm.c.o: C_COMPILER__main_unscanned_Debug /home/jon/BattleSquadron/src/musashi/m68kdasm.c || cmake_object_order_depends_target_main
   CONFIG = Debug
   DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
-  DEP_FILE = CMakeFiles/main.dir/home/jon/SWIV/src/musashi/softfloat/softfloat.c.o.d
+  DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kdasm.c.o.d
   FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
-  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron-Amiga/../SWIV/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
   OBJECT_DIR = CMakeFiles/main.dir
-  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/SWIV/src/musashi/softfloat
+  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi
+  TARGET_SUPPORT_DIR = CMakeFiles/main.dir
+
+build CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/softfloat/softfloat.c.o: C_COMPILER__main_unscanned_Debug /home/jon/BattleSquadron/src/musashi/softfloat/softfloat.c || cmake_object_order_depends_target_main
+  CONFIG = Debug
+  DEFINES = -DGRAPHICS_API_OPENGL_ES2 -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER -DPLATFORM_ANDROID -Dmain_EXPORTS
+  DEP_FILE = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/softfloat/softfloat.c.o.d
+  FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -std=gnu11 -fPIC -O2 -Wall -Wextra -include /home/jon/BattleSquadron-Amiga/src/host/amiga.h
+  INCLUDES = -I/home/jon/BattleSquadron-Amiga/src/host -I/home/jon/BattleSquadron/src/musashi -I/home/jon/Android/Sdk/ndk/26.1.10909125/sources/android/native_app_glue -I/home/jon/raylib-src/src
+  OBJECT_DIR = CMakeFiles/main.dir
+  OBJECT_FILE_DIR = CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/softfloat
   TARGET_SUPPORT_DIR = CMakeFiles/main.dir
 
 
@@ -117,7 +137,7 @@ build CMakeFiles/main.dir/home/jon/SWIV/src/musashi/softfloat/softfloat.c.o: C_C
 #############################################
 # Link the shared library /home/jon/BattleSquadron-Amiga/android/app/build/intermediates/cxx/Debug/371f144a/obj/arm64-v8a/libmain.so
 
-build /home/jon/BattleSquadron-Amiga/android/app/build/intermediates/cxx/Debug/371f144a/obj/arm64-v8a/libmain.so: C_SHARED_LIBRARY_LINKER__main_Debug CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/frontend.c.o CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/amiga.c.o CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kcpu.c.o CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kops.c.o CMakeFiles/main.dir/home/jon/SWIV/src/musashi/m68kdasm.c.o CMakeFiles/main.dir/home/jon/SWIV/src/musashi/softfloat/softfloat.c.o | raylib/raylib/libraylib.a || raylib/raylib/libraylib.a
+build /home/jon/BattleSquadron-Amiga/android/app/build/intermediates/cxx/Debug/371f144a/obj/arm64-v8a/libmain.so: C_SHARED_LIBRARY_LINKER__main_Debug CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/frontend.c.o CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/pad.c.o CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/amiga.c.o CMakeFiles/main.dir/home/jon/BattleSquadron-Amiga/src/host/whdload.c.o CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kcpu.c.o CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kops.c.o CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/m68kdasm.c.o CMakeFiles/main.dir/home/jon/BattleSquadron/src/musashi/softfloat/softfloat.c.o | raylib/raylib/libraylib.a || raylib/raylib/libraylib.a
   CONFIG = Debug
   DEP_FILE = CMakeFiles/main.dir/link.d
   LANGUAGE_COMPILE_FLAGS = -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info
