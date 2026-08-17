@@ -51,6 +51,26 @@ void amiga_display_state(uint16_t *bplcon0, uint16_t *dmacon,
                          uint16_t *diwstrt, uint16_t *diwstop);
 void amiga_display_bounds(int *first_row, int *last_row);
 void amiga_palette(uint16_t *out);   /* 32 entries */
+
+/* Replace-on-blit.  A title can claim a range of blit source addresses; when
+ * the blitter draws from that range the original pixels are suppressed and a
+ * request is recorded here instead, with the screen rectangle it would have
+ * covered.  A frontend then draws whatever it likes there -- at any colour
+ * depth or resolution, because nothing about that is the chipset's business
+ * any more.  This is why the 32-colour limit is not a limit: it belongs to
+ * the game's data, not to the renderer. */
+typedef struct {
+    int      x, y;          /* framebuffer position of the top-left */
+    int      width, height; /* the size the original would have drawn */
+    int      id;            /* whatever the title registered */
+} BsSpriteDraw;
+
+extern BsSpriteDraw bs_sprite_draws[64];
+extern int bs_sprite_draw_count;
+
+void amiga_register_replacement(uint32_t source_low, uint32_t source_high,
+                                int id);
+void amiga_clear_replacements(void);
 void amiga_return_from_hook(void);
 
 void amiga_init(const char *data_dir);

@@ -136,9 +136,21 @@ static void resign_loader(void)
     }
 }
 
+/* The armoured alien's artwork.  Its frames sit together in the loaded data,
+ * five planes each (four colour, the fifth an inverted mask), every plane
+ * padded to 128 bytes.  Claiming the range means the blitter draws none of
+ * it and the frontend paints a replacement at the same screen rectangle --
+ * at whatever colour depth and resolution it likes, because that is no
+ * longer the chipset's business. */
+#define ALIEN_ART_LOW   0x018000
+#define ALIEN_ART_HIGH  0x018600
+#define ALIEN_ID        0
+
 bool hybris_loader_install(const char *directory)
 {
     if (!hybris_files_load(directory)) return false;
+    if (getenv("HYBRIS_REMASTER"))
+        amiga_register_replacement(ALIEN_ART_LOW, ALIEN_ART_HIGH, ALIEN_ID);
     resign_loader();
     trace = getenv("HYBRIS_TRACE_LOAD") != NULL;
     amiga_set_pc_hook(hybris_hook);

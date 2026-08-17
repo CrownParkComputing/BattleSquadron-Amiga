@@ -230,12 +230,70 @@ static void log_blit_source(uint32_t source, int width, int height,
     fflush(log);
 }
 
+/* Blit sources a title has claimed, and the draw requests they produce. */
+typedef struct { uint32_t low, high; int id; } Replacement;
+static Replacement replacements[16];
+static int replacement_count;
+BsSpriteDraw bs_sprite_draws[64];
+int bs_sprite_draw_count;
+static uint32_t frame_bpl0;          /* bitplane 0 at the top of the frame */
+
+void amiga_register_replacement(uint32_t low, uint32_t high, int id)
+{
+    if (replacement_count == (int)(sizeof replacements / sizeof *replacements))
+        return;
+    replacements[replacement_count].low = low;
+    replacements[replacement_count].high = high;
+    replacements[replacement_count].id = id;
+    replacement_count++;
+}
+
+void amiga_clear_replacements(void) { replacement_count = 0; }
+
+/* Returns the id if this blit is a claimed one AND is the first plane of it,
+ * having recorded where it would have landed; -1 otherwise. */
+static int claim_blit(uint32_t source, uint32_t dest, int words, int rows)
+{
+    if (!replacement_count || !frame_bpl0) return -1;
+    for (int i = 0; i < replacement_count; i++) {
+        if (source < replacements[i].low || source >= replacements[i].high)
+            continue;
+        /* Only plane 0 produces a request; the other four land a bitplane
+         * further on each and would otherwise draw the same thing five
+         * times. */
+        int32_t offset = (int32_t)(dest - frame_bpl0);
+        if (offset < 0 || offset >= 0x4000) return replacements[i].id;
+        if (bs_sprite_draw_count <
+            (int)(sizeof bs_sprite_draws / sizeof *bs_sprite_draws)) {
+            /* The game draws into the buffer it is not displaying, so a
+             * destination can be a whole screen further on than the pointer
+             * being scanned out.  The buffer is 256 rows; fold it back. */
+            int row = (offset / 32) % 256;
+            int column = (offset % 32) * 8;
+            BsSpriteDraw *draw = &bs_sprite_draws[bs_sprite_draw_count++];
+            draw->x = column + ((int)(diwstrt & 0xff) - display_left);
+            draw->y = row + (((int)(diwstrt >> 8) & 0xff) - display_top);
+            draw->width = words * 16;
+            draw->height = rows;
+            draw->id = replacements[i].id;
+        }
+        return replacements[i].id;
+    }
+    return -1;
+}
+
 static void blit(uint16_t size)
 {
     int height = (size >> 6) & 0x3ff;
     int width = size & 0x3f;
     if (!height) height = 1024;
     if (!width) width = 64;
+    /* A claimed source draws nothing: the frontend paints it instead. */
+    if (((bltcon0 & 0x0800) &&
+         claim_blit(bltpt[0], bltpt[3], width, height) >= 0) ||
+        ((bltcon0 & 0x0400) &&
+         claim_blit(bltpt[1], bltpt[3], width, height) >= 0))
+        return;
     if (bltcon0 & 0x0800)
         log_blit_source(bltpt[0], width, height, bltcon0, bltmod[0],
                         bltpt[3], bltmod[3]);
@@ -1421,6 +1479,8 @@ void amiga_run_frame(void)
             framebuf[pixel] = background;
         copper_start();
     }
+    frame_bpl0 = bplpt[0];
+    bs_sprite_draw_count = 0;
     for (cur_line = 0; cur_line < LINES_PER_FRAME && !stopped; cur_line++) {
         memcpy(color_line_start, color, sizeof color_line_start);
         color_change_count = 0;

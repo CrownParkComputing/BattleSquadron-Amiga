@@ -225,6 +225,12 @@ int main(int argc, char **argv)
     /* The title screen's window ends well above the bottom of the raster, so
      * the band under it is border the game never draws in -- room for our
      * own mark without covering anything of the original. */
+    /* Remastered artwork, drawn over the frame wherever the game would have
+     * blitted the original.  24-bit with alpha, at higher resolution than the
+     * Amiga could hold. */
+    Texture2D alien = LoadTexture("assets/sprites/alien.png");
+    if (alien.id) SetTextureFilter(alien, TEXTURE_FILTER_BILINEAR);
+
     if (load_track("assets/battle-squadron-theme.wav"))
         fprintf(stderr, "alternative soundtrack: %.1fs loaded (L1 toggles)\n",
                 track_frames / 44100.0);
@@ -328,6 +334,21 @@ int main(int argc, char **argv)
         Rectangle where = fit_screen();
         DrawTexturePro(texture, (Rectangle){0, 0, SCREEN_W, SCREEN_H},
                        where, (Vector2){0, 0}, 0, WHITE);
+        /* Replacement sprites: one request per object the game drew. */
+        if (alien.id) {
+            float sx = where.width / (float)SCREEN_W;
+            float sy = where.height / (float)SCREEN_H;
+            for (int i = 0; i < bs_sprite_draw_count; i++) {
+                const BsSpriteDraw *d = &bs_sprite_draws[i];
+                if (d->id != 0) continue;
+                DrawTexturePro(alien,
+                    (Rectangle){0, 0, (float)alien.width, (float)alien.height},
+                    (Rectangle){where.x + d->x * sx, where.y + d->y * sy,
+                                d->width * sx, d->height * sy},
+                    (Vector2){0, 0}, 0, WHITE);
+            }
+        }
+
         uint16_t diwstrt;
         amiga_display_state(NULL, NULL, &diwstrt, NULL);
         if (logo.id && diwstrt == TITLE_DIWSTRT) {
@@ -368,6 +389,7 @@ int main(int argc, char **argv)
     CloseAudioDevice();
     UnloadTexture(texture);
     if (logo.id) UnloadTexture(logo);
+    if (alien.id) UnloadTexture(alien);
     CloseWindow();
     printf("hybris: %ld frames, %ld file loads (%ld bytes)\n",
            bs_frame_no, hybris_load_count, hybris_load_bytes);

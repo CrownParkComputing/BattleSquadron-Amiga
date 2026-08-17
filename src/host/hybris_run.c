@@ -167,6 +167,16 @@ int main(int argc, char **argv)
             fwrite(audio, sizeof audio[0], 882 * 2, audio_dump);
             audio_frames += 882;
         }
+        if (getenv("BS_TRACE_REPLACE") && bs_sprite_draw_count) {
+            fprintf(stderr, "frame %ld: %d replacement(s)", frame,
+                    bs_sprite_draw_count);
+            for (int i = 0; i < bs_sprite_draw_count && i < 4; i++)
+                fprintf(stderr, "  id%d %dx%d at (%d,%d)",
+                        bs_sprite_draws[i].id, bs_sprite_draws[i].width,
+                        bs_sprite_draws[i].height, bs_sprite_draws[i].x,
+                        bs_sprite_draws[i].y);
+            fprintf(stderr, "\n");
+        }
         if (watch_file && frame > frames - 200)
             fwrite(chip + watch_at, 1, watch_len, watch_file);
         if (ppm_seq && bs_frame_no % ppm_every == 0) {
