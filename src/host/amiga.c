@@ -218,12 +218,16 @@ static void log_blit_source(uint32_t source, int width, int height,
     const char *path = getenv("BS_DUMP_BLITS");
     if (!path) return;
     if (!source || width <= 0 || height <= 0) return;
-    for (int i = 0; i < count; i++)
-        if (seen[i].source == source && seen[i].width == width &&
-            seen[i].height == height) return;
-    if (count == (int)(sizeof seen / sizeof seen[0])) return;
-    seen[count].source = source; seen[count].width = width;
-    seen[count].height = height; count++;
+    /* BS_DUMP_BLITS_ALL keeps every blit, which is what shows a FORMATION:
+     * one source drawn several times in a single frame. */
+    if (!getenv("BS_DUMP_BLITS_ALL")) {
+        for (int i = 0; i < count; i++)
+            if (seen[i].source == source && seen[i].width == width &&
+                seen[i].height == height) return;
+        if (count == (int)(sizeof seen / sizeof seen[0])) return;
+        seen[count].source = source; seen[count].width = width;
+        seen[count].height = height; count++;
+    }
     if (!log) { log = fopen(path, "w"); if (!log) return; }
     fprintf(log, "%06x %d %d %04x %d %06x %d %ld %06x\n", source, width,
             height, con0, modulo, dest, dest_mod, bs_frame_no, bplpt[0]);
