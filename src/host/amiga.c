@@ -778,6 +778,13 @@ static void render_line(int line)
     int window_start = (diwstrt & 0xff);
     int window_stop = (int)(diwstop & 0xff) | 0x100;
     int diw_bias = window_start - ((int)(ddfstrt & 0xfc) * 2 + 17);
+    /* The window cannot begin before the data does.  Hybris' title opens
+     * nine pixels ahead of where this reckons the first fetched pixel lands,
+     * and reading those columns walks backwards off the start of the line and
+     * shows the tail of the line above -- content wrapping from the right
+     * edge round to the left.  Blanking them instead just clips the sides, so
+     * treat the data as starting where the window does. */
+    if (fetch_lead + diw_bias < 0) diw_bias = -fetch_lead;
     int left = window_start - display_left;
     int visible = window_stop - window_start;
     if (visible < 0) visible = 0;
@@ -822,15 +829,6 @@ static void render_line(int line)
         /* In hires one buffer column covers two source pixels, so the
          * picture comes out the physical width it really is. */
         int source_scale = hires_mode() ? 2 : 1;
-        /* A window can open BEFORE the first pixel DDF fetched -- Hybris'
-         * title opens 9 pixels early -- and there is no data for those
-         * columns.  Reading them anyway walks backwards off the start of the
-         * line and shows the tail of the line above, which is content
-         * appearing to wrap from the right edge round to the left. */
-        if (window_x + fetch_lead + diw_bias + bs_playfield_shift < 0) {
-            output[x] = rgb4(palette[0]);
-            continue;
-        }
         int index = 0;
         if (!dual) {
             int source_x = (window_x + fetch_lead + diw_bias +
