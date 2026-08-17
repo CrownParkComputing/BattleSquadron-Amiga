@@ -132,6 +132,14 @@ static uint8_t gamepad_input(unsigned player)
 
 static void update_input(BsRecomp *machine)
 {
+    /* BS_PREVIEW_INPUT=fire drives the same held-fire input the headless
+     * tools use, so a preview dump can be diffed against render_at at the
+     * same game cycle instead of against a different playthrough. */
+    if (getenv("BS_PREVIEW_INPUT")) {
+        bs_recomp_set_input(machine, 0, BS_INPUT_FIRE);
+        bs_recomp_set_input(machine, 1, 0);
+        return;
+    }
     static unsigned rescan;
     if (++rescan >= 100) {
         discover_gamepads(0);
@@ -274,6 +282,9 @@ int main(int argc, char **argv)
                                     audio_output);
     bs_recomp_set_audio_sample_hook(machine, play_original_sample,
                                     audio_output);
+    /* Run the $24F34 sequencer.  It is off by default so the step-exact
+     * oracle tests keep their register traces; the preview wants the music. */
+    bs_recomp_set_music_enabled(machine, 1);
     bs_recomp_set_external_playfield_restore(machine, 1);
     InitAudioDevice();
     SetAudioStreamBufferSizeDefault(256);
@@ -283,6 +294,7 @@ int main(int argc, char **argv)
     if (!run_exact(machine, 38, 0x4ec, "spoken intro")) return 1;
     PresentationStage stage = PRESENT_INTRO;
     int stage_frame = 0;
+    long game_cycles = 0;
     int audio_started = 0;
     OcsVideoSource source = video_source(machine);
     const uint32_t *pixels = ocs_video_render(video, &source);
@@ -348,10 +360,19 @@ int main(int argc, char **argv)
                 static int logic_phase;
                 update_input(machine);
                 advanced = !(logic_phase++ & 1);
-                if (advanced &&
-                    !run_game_display_frame(machine, clean_playfield))
-                    finished = 1;
+                if (advanced) {
+                    if (!run_game_display_frame(machine, clean_playfield))
+                        finished = 1;
+                    else
+                        game_cycles++;
+                }
             }
+            /* The sequencer is a CIA-B interrupt on the real machine, so it
+             * has to keep running on frames the dispatcher is not: the intro
+             * and title stages never step the machine at all, which left them
+             * completely silent. */
+            if (stage != PRESENT_GAME)
+                bs_recomp_music_tick(machine);
             paula_audio_queue_pal_frame(audio_output);
             if (!audio_started && paula_audio_fill(audio_output) >= 1764) {
                 PlayAudioStream(stream);
@@ -365,6 +386,33 @@ int main(int argc, char **argv)
                 source = video_source(machine);
                 pixels = ocs_video_render(video, &source);
                 UpdateTexture(texture, pixels);
+                /* BS_PREVIEW_DUMP=<frame> writes exactly what the preview is
+                 * showing to build/preview_dump.ppm and quits, so the on-screen
+                 * image can be diffed against the oracle without screenshots. */
+                {
+                    static long shown;
+                    const char *want = getenv("BS_PREVIEW_DUMP");
+                    if (want && ++shown == atol(want)) {
+                        FILE *out = fopen("build/preview_dump.ppm", "wb");
+                        if (out) {
+                            fprintf(out, "P6\n%d %d\n255\n",
+                                    OCS_VIDEO_WIDTH, OCS_VIDEO_HEIGHT);
+                            for (int i = 0;
+                                 i < OCS_VIDEO_WIDTH * OCS_VIDEO_HEIGHT; i++) {
+                                fputc(pixels[i] & 0xff, out);
+                                fputc((pixels[i] >> 8) & 0xff, out);
+                                fputc((pixels[i] >> 16) & 0xff, out);
+                            }
+                            fclose(out);
+                        }
+                        fprintf(stderr, "preview: dumped shown-frame %ld (stage %s) after "
+                                "%ld game cycles, t1078=%u\n", shown,
+                                stage_name(stage), game_cycles,
+                                bs_recomp_read16(machine, 0x1078));
+                        finished = 1;
+                        break;
+                    }
+                }
                 if (stage == PRESENT_GAME && getenv("BS_TRACE_GOLD")) {
                     /* Report compact clusters of the gold sprite colours and
                      * every record that could be drawing them. */
@@ -451,7 +499,7 @@ int main(int argc, char **argv)
 
             unsigned objects = 0;
             for (int slot = 0; slot < 18; slot++)
-                if (bs_recomp_read16(machine, 0x2e040 + slot * 0x50) != 0)
+                if (bs_recomp_read16(machine, 0x2e040 + slot * 0x40) != 0)
                     objects++;
             unsigned shots = 0;
             for (int slot = 0; slot < 12; slot++)

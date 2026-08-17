@@ -4,6 +4,7 @@
  * shim supplies flat chip RAM, named-file loading, beam position, interrupts,
  * CIA defaults, and the OCS blitter subset used by the loader. */
 #include "amiga.h"
+#include "whdload.h"
 #include "m68k.h"
 
 #include <stdio.h>
@@ -35,6 +36,22 @@ static uint16_t diwstrt = 0x2c81, diwstop = 0x2cc1;
 static uint16_t ddfstrt = 0x0038, ddfstop = 0x00d0;
 static uint32_t cop_pc;
 static int cop_wait_line;
+static bool in_copper;
+/* Where in the line the copper currently is, in colour clocks: a WAIT has a
+ * horizontal target as well as a vertical one, and a title that highlights
+ * one of two words on the SAME line does it by changing a colour partway
+ * across.  Ignoring that made both words take the last colour written --
+ * which is why both commander names highlighted at once on Hybris' title. */
+static int cop_h;
+/* Where the framebuffer's left edge sits in raster coordinates.  Normally the
+ * textbook lores origin ($81), but a window WIDER than the buffer (Hybris'
+ * title screen opens 336 pixels at hpos 120) is centred on what it can show
+ * instead of being pinned there and losing the right-hand side. */
+static int display_left = 0x81;
+static uint16_t color_line_start[32];
+typedef struct { int x; uint8_t index; uint16_t value; } ColorChange;
+static ColorChange color_changes[128];
+static int color_change_count;
 
 static uint8_t kbd_queue[32];
 static int kbd_head, kbd_tail;
@@ -58,6 +75,29 @@ static int audio_write_pos, audio_read_pos;
  * drain the ring without taking a lock around the 68000 core. */
 static _Atomic int audio_fill;
 
+bool bs_loader_hooks = true;
+static BsPcHook pc_hook;
+
+/* Sprites written straight to the registers, as opposed to fetched by DMA
+ * from a sprite list.  Hybris draws its whole score panel this way: the
+ * copper writes SPRxDATB/SPRxDATA then SPRxPOS, several times across a single
+ * scanline, so one sprite paints several glyphs.  Nothing about that goes
+ * through a sprite list, so a host that only walks SPRxPT shows no panel at
+ * all. */
+static uint16_t spr_pos[8], spr_ctl[8], spr_data[8], spr_datb[8];
+/* Hardware arming: writing SPRxDATA arms a sprite, writing SPRxCTL disarms
+ * it.  Hybris relies on both -- after its panel it clears SPR0CTL/SPR1CTL and
+ * then rewrites SPRxPOS to hand the channels back to DMA, and painting those
+ * writes put two phantom glyphs next to the icons on the top row. */
+static bool spr_armed[8];
+typedef struct {
+    uint8_t  sprite;
+    int      hstart;
+    uint16_t data, datb;
+} SpritePaint;
+static SpritePaint spr_paint[128];
+static int spr_paint_count;
+
 static uint16_t bltcon0, bltcon1, bltafwm, bltalwm;
 static uint32_t bltpt[4];             /* A, B, C, D */
 static int16_t bltmod[4];
@@ -65,6 +105,22 @@ static uint16_t bltdat[3];            /* A, B, C */
 static bool blt_zero = true;
 
 static void copper_start(void);
+
+/* The vertical origin of the framebuffer: normally the display window's own
+ * first line, but sprites are NOT clipped to the window vertically, so a
+ * title that hangs its status icons above the playfield needs the buffer to
+ * start where the sprites do.  Hybris opens its window at line 39 and puts
+ * the core and bomb icons at line 30; anchoring on the window alone sliced
+ * nine rows off the top of them. */
+static int display_top;
+static bool display_top_valid;
+
+/* Any caller that renders a line without running a whole frame -- the self
+ * tests and the still-frame tools -- gets the plain window top. */
+static int frame_top(void)
+{
+    return display_top_valid ? display_top : (int)((diwstrt >> 8) & 0xff);
+}
 
 static void audio_dma_update(uint16_t old_dmacon)
 {
@@ -148,12 +204,41 @@ static uint16_t minterm(uint8_t function, uint16_t a, uint16_t b, uint16_t c)
     return d;
 }
 
+/* Every distinct blit source, for ripping graphics: a BOB is drawn from its
+ * artwork, so logging where the blitter reads gives the address, width and
+ * height of every piece of art the game actually puts on screen -- far more
+ * reliable than guessing at the layout of a packed data file. */
+static void log_blit_source(uint32_t source, int width, int height,
+                            uint16_t con0, int modulo)
+{
+    static FILE *log;
+    static struct { uint32_t source; int width, height; } seen[4096];
+    static int count;
+    const char *path = getenv("BS_DUMP_BLITS");
+    if (!path) return;
+    if (!source || width <= 0 || height <= 0) return;
+    for (int i = 0; i < count; i++)
+        if (seen[i].source == source && seen[i].width == width &&
+            seen[i].height == height) return;
+    if (count == (int)(sizeof seen / sizeof seen[0])) return;
+    seen[count].source = source; seen[count].width = width;
+    seen[count].height = height; count++;
+    if (!log) { log = fopen(path, "w"); if (!log) return; }
+    fprintf(log, "%06x %d %d %04x %d\n", source, width, height, con0,
+            modulo);
+    fflush(log);
+}
+
 static void blit(uint16_t size)
 {
     int height = (size >> 6) & 0x3ff;
     int width = size & 0x3f;
     if (!height) height = 1024;
     if (!width) width = 64;
+    if (bltcon0 & 0x0800)
+        log_blit_source(bltpt[0], width, height, bltcon0, bltmod[0]);
+    if (bltcon0 & 0x0400)
+        log_blit_source(bltpt[1], width, height, bltcon0, bltmod[1]);
     int ashift = (bltcon0 >> 12) & 15;
     int bshift = (bltcon1 >> 12) & 15;
     bool usea = bltcon0 & 0x0800;
@@ -207,6 +292,22 @@ static void blit(uint16_t size)
     irq_update();
 }
 
+/* Which input registers a title actually polls, and from where: the only
+ * reliable way to wire a button it reads through a path this host did not
+ * expect. */
+static void trace_input(const char *what, uint32_t value)
+{
+    if (!getenv("BS_TRACE_INPUT")) return;
+    static uint32_t seen[64];
+    static int count;
+    uint32_t pc = m68k_get_reg(NULL, M68K_REG_PPC);
+    for (int i = 0; i < count; i++)
+        if (seen[i] == pc) return;
+    if (count < 64) seen[count++] = pc;
+    fprintf(stderr, "input: %s read from pc=$%06x (value $%04x)\n",
+            what, pc, value);
+}
+
 static uint16_t custom_read(uint32_t reg)
 {
     switch (reg) {
@@ -220,6 +321,7 @@ static uint16_t custom_read(uint32_t reg)
     case 0x00a:
     case 0x00c: {
         uint8_t state = joy_state[reg == 0x00a ? 0 : 1];
+        trace_input(reg == 0x00a ? "JOY0DAT" : "JOY1DAT", state);
         int up = state & 1;
         int down = (state >> 1) & 1;
         int left = (state >> 2) & 1;
@@ -231,7 +333,21 @@ static uint16_t custom_read(uint32_t reg)
         uint16_t value = 0xffff;       /* second buttons are active low */
         if (joy_state[0] & 0x20) value &= (uint16_t)~0x0004;
         if (joy_state[1] & 0x20) value &= (uint16_t)~0x0040;
+        trace_input("POTGOR", value);
         return value;
+    }
+    case 0x012:
+    case 0x014: {
+        /* POTxDAT.  A second joystick button pulls pin 9 low, which stops
+         * that pot line counting -- which is how a game reads a two-button
+         * stick without POTGOR.  Hybris does exactly that: its input
+         * aggregator sets the same bit for a POT0DAT change as it does for
+         * SPACE. */
+        uint8_t state = joy_state[reg == 0x012 ? 0 : 1];
+        uint8_t pin9 = (state & 0x20) ? 0x00 : 0xff;   /* second button */
+        uint8_t pin5 = (state & 0x40) ? 0x00 : 0xff;   /* third button */
+        trace_input(reg == 0x012 ? "POT0DAT" : "POT1DAT", pin9);
+        return (uint16_t)((pin9 << 8) | pin5);
     }
     case 0x01c: return intena & 0x7fff;
     case 0x01e: return intreq & 0x7fff;
@@ -271,8 +387,16 @@ static void custom_write(uint32_t reg, uint16_t value)
     case 0x080: cop1lc = (cop1lc & 0xffff) | ((uint32_t)value << 16); break;
     case 0x082: cop1lc = (cop1lc & 0xffff0000) | (value & 0xfffe); break;
     case 0x088: copper_start(); break;
-    case 0x08e: diwstrt = value; break;
-    case 0x090: diwstop = value; break;
+    case 0x08e:
+        if (getenv("BS_TRACE_DIW") && value != diwstrt)
+            fprintf(stderr, "DIWSTRT $%04x (v %d..) line %d\n", value,
+                    value >> 8, cur_line);
+        diwstrt = value; break;
+    case 0x090:
+        if (getenv("BS_TRACE_DIW") && value != diwstop)
+            fprintf(stderr, "DIWSTOP $%04x (v ..%d) line %d\n", value,
+                    (value >> 8) | 0x100, cur_line);
+        diwstop = value; break;
     case 0x092: ddfstrt = value; break;
     case 0x094: ddfstop = value; break;
     case 0x096: {
@@ -297,6 +421,43 @@ static void custom_write(uint32_t reg, uint16_t value)
             else
                 bplpt[plane] = (bplpt[plane] & 0xffff) |
                                 ((uint32_t)value << 16);
+        } else if (reg >= 0x140 && reg < 0x180) {
+            int sprite = (reg - 0x140) / 8;
+            switch ((reg - 0x140) & 6) {
+            case 0:
+                spr_pos[sprite] = value;
+                /* POS is written last in a copper-drawn glyph, so this is
+                 * the point the pair is complete and can be painted. */
+                if (getenv("BS_TRACE_SPRW") && spr_armed[sprite] &&
+                    (spr_data[sprite] | spr_datb[sprite])) {
+                    static long copper_writes, cpu_writes;
+                    if (in_copper) copper_writes++; else cpu_writes++;
+                    if (((copper_writes + cpu_writes) % 20000) == 0)
+                        fprintf(stderr, "sprite POS paints: copper %ld, "
+                                "cpu %ld\n", copper_writes, cpu_writes);
+                }
+                if (spr_armed[sprite] &&
+                    (spr_data[sprite] | spr_datb[sprite]) &&
+                    spr_paint_count < (int)(sizeof spr_paint /
+                                            sizeof spr_paint[0])) {
+                    SpritePaint *paint = &spr_paint[spr_paint_count++];
+                    paint->sprite = (uint8_t)sprite;
+                    paint->hstart = ((value & 0xff) << 1) |
+                                    (spr_ctl[sprite] & 1);
+                    paint->data = spr_data[sprite];
+                    paint->datb = spr_datb[sprite];
+                }
+                break;
+            case 2:
+                spr_ctl[sprite] = value;
+                spr_armed[sprite] = false;         /* CTL write disarms */
+                break;
+            case 4:
+                spr_data[sprite] = value;
+                spr_armed[sprite] = true;          /* DATA write arms */
+                break;
+            case 6: spr_datb[sprite] = value; break;
+            }
         } else if (reg >= 0x120 && reg < 0x140) {
             int sprite = (reg - 0x120) / 4;
             if (reg & 2)
@@ -306,7 +467,33 @@ static void custom_write(uint32_t reg, uint16_t value)
                 sprpt[sprite] = (sprpt[sprite] & 0xffff) |
                                 ((uint32_t)value << 16);
         } else if (reg >= 0x180 && reg < 0x1c0) {
-            color[(reg - 0x180) / 2] = value & 0x0fff;
+            if (getenv("BS_TRACE_COL") && reg >= 0x1b0 && reg <= 0x1b6)
+                fprintf(stderr, "line %3d %s COLOR%02d = $%03x pc=$%06x\n",
+                        cur_line, in_copper ? "COPPER" : "cpu   ",
+                        (reg - 0x180) / 2, value & 0xfff,
+                        in_copper ? 0 : m68k_get_reg(NULL, M68K_REG_PC));
+            {
+                uint8_t index = (uint8_t)((reg - 0x180) / 2);
+                uint16_t rgb = value & 0x0fff;
+                if (getenv("BS_TRACE_COLW") &&
+                    index == atoi(getenv("BS_TRACE_COLW")))
+                    fprintf(stderr, "colw line %d COLOR%d=$%03x copper=%d "
+                            "cop_h=%d\n", cur_line, index, rgb, in_copper,
+                            cop_h);
+                color[index] = rgb;
+                /* A copper write partway across the line takes effect there;
+                 * anything else applies from the start of the line. */
+                if (in_copper && cop_h > 0 &&
+                    color_change_count < (int)(sizeof color_changes /
+                                               sizeof color_changes[0])) {
+                    ColorChange *change = &color_changes[color_change_count++];
+                    change->x = cop_h * 2 - display_left;
+                    change->index = index;
+                    change->value = rgb;
+                } else {
+                    color_line_start[index] = rgb;
+                }
+            }
         } else if (reg >= 0x0a0 && reg < 0x0e0) {
             AudioChannel *state = &audio[(reg - 0x0a0) / 16];
             bs_audio_writes++;
@@ -327,6 +514,21 @@ static void custom_write(uint32_t reg, uint16_t value)
 
 static void copper_start(void)
 {
+    if (getenv("BS_DUMP_COPPER") && bs_frame_no == atol(getenv("BS_DUMP_COPPER"))) {
+        uint32_t at = cop1lc & (CHIP_SIZE - 1);
+        fprintf(stderr, "copper list at $%06x:\n", at);
+        for (int i = 0; i < 2000; i++) {
+            uint16_t a1 = rw(at), a2 = rw(at + 2);
+            if (a1 & 1)
+                fprintf(stderr, "  %s v=%d h=$%02x  ($%04x $%04x)\n",
+                        (a2 & 1) ? "SKIP" : "WAIT", (a1 >> 8) & 0xff,
+                        a1 & 0xfe, a1, a2);
+            else
+                fprintf(stderr, "  MOVE $%03x = $%04x\n", a1 & 0x1fe, a2);
+            at += 4;
+            if (a1 == 0xffff && a2 == 0xfffe) break;
+        }
+    }
     cop_pc = cop1lc & (CHIP_SIZE - 1);
     cop_wait_line = cop1lc ? 0 : -1;
 }
@@ -339,7 +541,20 @@ static void copper_run_line(int line)
         uint16_t second = rw(cop_pc + 2);
         if (!(first & 1)) {
             cop_pc = (cop_pc + 4) & (CHIP_SIZE - 1);
+            in_copper = true;
+            if (getenv("BS_TRACE_COPW")) {
+                static long at_frame = -1;
+                long from = getenv("BS_TRACE_COPW_FROM")
+                    ? atol(getenv("BS_TRACE_COPW_FROM")) : 1500;
+                if (at_frame != bs_frame_no && bs_frame_no > from) {
+                    if (at_frame != bs_frame_no && (first & 0x1fe) < 0x180)
+                        fprintf(stderr, "cop line %3d reg $%03x = $%04x\n",
+                                cur_line, first & 0x1fe, second);
+                    if (cur_line >= 310) at_frame = bs_frame_no;
+                }
+            }
             custom_write(first & 0x01fe, second);
+            in_copper = false;
             bs_copper_moves++;
         } else if (!(second & 1)) {
             if (first == 0xffff && second == 0xfffe) {
@@ -348,7 +563,20 @@ static void copper_run_line(int line)
             }
             int target = (first >> 8) & 0xff;
             int mask = ((second >> 8) & 0x7f) | 0x80;
+            if (getenv("BS_TRACE_COP")) {
+                static int shown;
+                if (shown < 24) {
+                    fprintf(stderr,
+                        "line %3d WAIT first=$%04x second=$%04x target=%d "
+                        "mask=$%02x -> %s\n", cur_line, first, second, target,
+                        mask,
+                        (((cur_line & 0xff) & mask) >= (target & mask))
+                            ? "satisfied" : "stall");
+                    shown++;
+                }
+            }
             if (((line & 0xff) & mask) >= (target & mask)) {
+                cop_h = first & 0xfe;
                 cop_pc = (cop_pc + 4) & (CHIP_SIZE - 1);
             } else {
                 cop_wait_line = (line & 0x100) | target;
@@ -379,13 +607,46 @@ static int display_vstop(void)
     return stop;
 }
 
+/* The horizontal position a display window of DIWSTRT $81 starts at: the
+ * textbook lores origin, and where a 320-wide window begins.  A window that
+ * starts later than this is genuinely further right on the screen, so it has
+ * to be drawn there -- Hybris opens a 255-pixel window at $A1 and belongs 32
+ * pixels in from the left border, not flush against it. */
+/* The first visible column of the PAL raster.  $70 rather than the textbook
+ * $81 because the buffer is now wide enough for overscan, and every window
+ * these titles open (Hybris at $78 and $A1, Battle Squadron at $80/$81) has
+ * to land inside it at its true position. */
+#define DISPLAY_ORIGIN_X 0x70
+/* The first line of the visible PAL raster.  The vertical origin is FIXED,
+ * exactly like the horizontal one: a window opened at line 64 genuinely sits
+ * 20 lines lower on screen than one opened at 44, and centring each window
+ * would throw that away.  Deriving it from anything that moves (sprite
+ * positions, latched or not) makes the whole picture jump. */
+#define DISPLAY_ORIGIN_Y 26
+
+/* A calibration nudge, in lores pixels, applied to where the playfield is
+ * sampled relative to the sprites.  The DDF-to-window relationship this host
+ * derives is right for Battle Squadron; leaving it adjustable is how a title
+ * that pairs DDFSTRT and DIWSTRT differently gets checked against the real
+ * thing without a rebuild. */
+int bs_playfield_shift;
+
+/* HIRES (BPLCON0 bit 15) fetches twice as many words per line and paints
+ * them at half the width.  Hybris' credit scroller is a 2-plane hires screen;
+ * laying its data out as lores made the text run off both edges and overlap
+ * itself, because each line consumed half the bytes it should have. */
+static bool hires_mode(void) { return (bplcon0 & 0x8000) != 0; }
+
 static int fetch_bytes(void)
 {
     int start = ddfstrt & 0xfc;
     int stop = ddfstop & 0xfc;
-    int words = stop >= start ? ((stop - start) >> 3) + 1 : 20;
+    int words;
+    if (stop < start) words = hires_mode() ? 40 : 20;
+    else if (hires_mode()) words = ((stop - start) >> 2) + 2;
+    else words = ((stop - start) >> 3) + 1;
     if (words < 1) words = 1;
-    if (words > 25) words = 25;
+    if (words > (hires_mode() ? 50 : 25)) words = hires_mode() ? 50 : 25;
     return words * 2;
 }
 
@@ -400,10 +661,26 @@ static int playfield_bit(uint32_t pointer, int source_x)
 static void render_line(int line)
 {
     int vstart = (diwstrt >> 8) & 0xff;
-    int y = line - vstart;
+    int y = line - frame_top();
     if (line < vstart || line >= display_vstop() || y < 0 || y >= SCREEN_H)
         return;
+    if (getenv("BS_TRACE_SPLIT") && color_change_count &&
+        line == atoi(getenv("BS_TRACE_SPLIT"))) {
+        fprintf(stderr, "line %d: %d colour change(s):", line,
+                color_change_count);
+        for (int i = 0; i < color_change_count; i++)
+            fprintf(stderr, " [x=%d COLOR%d=$%03x]", color_changes[i].x,
+                    color_changes[i].index, color_changes[i].value);
+        fprintf(stderr, "\n");
+    }
     uint32_t *output = &framebuf[y * SCREEN_W];
+    /* A caller that renders a line without running a frame (the self tests,
+     * the still-frame tools) has no line-start snapshot, so it just uses the
+     * live palette. */
+    uint16_t palette[32];
+    memcpy(palette, display_top_valid ? color_line_start : color,
+           sizeof palette);
+    int next_change = display_top_valid ? 0 : color_change_count;
     int depth = (bplcon0 >> 12) & 7;
     int bytes = fetch_bytes();
     /* A scrolling playfield starts DMA one fetch slot early (usually $30
@@ -411,21 +688,74 @@ static void render_line(int line)
      * Position fetched data relative to the normal display origin; merely
      * counting the extra word but drawing it at x=0 causes a 16-pixel jump
      * whenever the game rolls its fine scroll back to the next coarse word. */
+    /* Only a DDFSTRT EARLIER than the textbook $38 is an early fetch.  A
+     * LATER one does not mean a negative lead -- how far the window opens
+     * past the first fetched pixel is already what diw_bias measures, so
+     * letting this go negative counted the same distance twice.  Hybris
+     * (DDFSTRT $48, DIWSTRT_H $A1) was the case that exposed it: its
+     * playfield, and every blitter object drawn into it, sat 32 pixels right
+     * of the sprites, so the ship never lined up with its two pods. */
     int fetch_lead = (0x38 - (ddfstrt & 0xfc)) * 2;
+    if (fetch_lead < 0) fetch_lead = 0;
+    /* The playfield was positioned from the DDF fetch start while sprites are
+     * positioned from DIWSTRT, so the two only agreed when the game used the
+     * textbook pairing DIWSTRT_H = DDFSTRT*2 + 17.  Battle Squadron does not:
+     * DDFSTRT $38 implies $81, but it sets DIWSTRT_H $90, moving the window 15
+     * lores pixels right of where the fetched data begins.  Without this the
+     * whole playfield sat 15 pixels left of every sprite, which is why overlay
+     * panels drifted against the map as it scrolled. */
+    int window_start = (diwstrt & 0xff);
+    int window_stop = (int)(diwstop & 0xff) | 0x100;
+    int diw_bias = window_start - ((int)(ddfstrt & 0xfc) * 2 + 17);
+    int left = window_start - display_left;
+    int visible = window_stop - window_start;
+    if (visible < 0) visible = 0;
+    /* A window can be WIDER than the data DDF fetches for it -- Hybris opens
+     * 336 pixels but fetches 320.  Drawing the difference read off the end of
+     * the line and into the next one, which showed up as the title graphics
+     * overlapping themselves.  Past the fetched data the hardware has nothing
+     * to show, so the border colour it is. */
+    int fetched = fetch_bytes() * 8 / (hires_mode() ? 2 : 1);
+    if (visible > fetched) visible = fetched;
     if (depth > 6) depth = 6;
     bool dma = (dmacon & 0x0300) == 0x0300;
     if (!dma || !depth) {
-        uint32_t background = rgb4(color[0]);
-        for (int x = 0; x < SCREEN_W; x++) output[x] = background;
+        for (int x = 0; x < SCREEN_W; x++) {
+            while (next_change < color_change_count &&
+                   color_changes[next_change].x <= x) {
+                palette[color_changes[next_change].index] =
+                    color_changes[next_change].value;
+                next_change++;
+            }
+            output[x] = rgb4(palette[0]);
+        }
         return;
     }
 
     bool dual = (bplcon0 & 0x0400) != 0;
     bool pf2_priority = (bplcon2 & 0x0040) != 0;
     for (int x = 0; x < SCREEN_W; x++) {
+        while (next_change < color_change_count &&
+               color_changes[next_change].x <= x) {
+            palette[color_changes[next_change].index] =
+                color_changes[next_change].value;
+            next_change++;
+        }
+        /* Outside the display window the hardware shows the border colour,
+         * on BOTH sides: a narrow window has a left border too. */
+        if (x < left || x >= left + visible) {
+            output[x] = rgb4(palette[0]);
+            continue;
+        }
+        int window_x = x - left;
+        /* In hires one buffer column covers two source pixels, so the
+         * picture comes out the physical width it really is. */
+        int source_scale = hires_mode() ? 2 : 1;
         int index = 0;
         if (!dual) {
-            int source_x = x + fetch_lead - (bplcon1 & 15);
+            int source_x = (window_x + fetch_lead + diw_bias +
+                            bs_playfield_shift) * source_scale -
+                           (bplcon1 & 15);
             for (int plane = 0; plane < depth; plane++)
                 index |= playfield_bit(bplpt[plane], source_x) << plane;
         } else {
@@ -433,7 +763,8 @@ static void render_line(int line)
             for (int plane = 0; plane < depth; plane++) {
                 int scroll = (plane & 1) ? ((bplcon1 >> 4) & 15)
                                          : (bplcon1 & 15);
-                int source_x = x + fetch_lead - scroll;
+                int source_x = (window_x + fetch_lead + diw_bias +
+                                bs_playfield_shift) * source_scale - scroll;
                 int value = playfield_bit(bplpt[plane], source_x);
                 if (plane & 1) pf2 |= value << (plane >> 1);
                 else pf1 |= value << (plane >> 1);
@@ -443,7 +774,7 @@ static void render_line(int line)
             else
                 index = pf1 ? pf1 : (pf2 ? 8 + pf2 : 0);
         }
-        output[x] = rgb4(color[index & 31]);
+        output[x] = rgb4(palette[index & 31]);
         if (index) bs_nonblack_pixels++;
     }
     for (int plane = 0; plane < depth; plane++)
@@ -469,6 +800,18 @@ static SpriteLine sprite_line(int number, int line)
         int vstop = (ctl >> 8) | ((ctl & 2) << 7);
         int rows = vstop - vstart;
         if (rows <= 0 || rows > 300) break;
+        if (getenv("BS_TRACE_SPRV")) {
+            static int reported[8][8];
+            static long at_frame = -1;
+            if (at_frame != bs_frame_no) { memset(reported, 0, sizeof reported);
+                                           at_frame = bs_frame_no; }
+            if (guard < 8 && !reported[number][guard]) {
+                reported[number][guard] = 1;
+                fprintf(stderr, "sprv%d image %d: lines %d..%d "
+                        "(window starts %d)\n", number, guard, vstart, vstop,
+                        (diwstrt >> 8) & 0xff);
+            }
+        }
         if (line >= vstart && line < vstop) {
             uint32_t data = pointer + 4 + (uint32_t)(line - vstart) * 4;
             result.active = true;
@@ -484,10 +827,45 @@ static SpriteLine sprite_line(int number, int line)
     return result;
 }
 
+/* Paint the glyphs queued by this line's register writes.  They are not
+ * gated on sprite DMA: writing SPRxDATA displays a sprite whether or not the
+ * DMA channel is running. */
+static void paint_written_sprites(int line)
+{
+    if (getenv("BS_NO_WRITTEN_SPRITES")) { spr_paint_count = 0; return; }
+    int y = line - frame_top();
+    if (y < 0 || y >= SCREEN_H) { spr_paint_count = 0; return; }
+    for (int i = 0; i < spr_paint_count; i++) {
+        const SpritePaint *paint = &spr_paint[i];
+        int bank = 16 + (paint->sprite / 2) * 4;
+        for (int bit = 0; bit < 16; bit++) {
+            int x = paint->hstart - display_left + bit;
+            if (x < 0 || x >= SCREEN_W) continue;
+            int index = ((paint->data >> (15 - bit)) & 1) |
+                        (((paint->datb >> (15 - bit)) & 1) << 1);
+            if (!index) continue;
+            framebuf[y * SCREEN_W + x] = rgb4(color[bank + index]);
+            bs_nonblack_pixels++;
+        }
+    }
+    spr_paint_count = 0;
+}
+
 static void render_sprites_line(int line)
 {
-    int y = line - ((diwstrt >> 8) & 0xff);
+    int y = line - frame_top();
     if (y < 0 || y >= SCREEN_H) return;
+    /* Sprites are hidden past DIWSTOP just as the playfield is.  Clipping only
+     * the playfield left sprite-drawn text stacked up in the right-hand border
+     * -- the credits and message screens draw their glyphs as sprites. */
+    /* Sprites are positioned in the same screen coordinates as the window,
+     * so they use the same origin; clipping still follows DIWSTOP. */
+    int sprite_left = (int)(diwstrt & 0xff) - display_left;
+    int sprite_visible = (((int)(diwstop & 0xff) | 0x100) - (diwstrt & 0xff));
+    if (sprite_visible < 0) sprite_visible = 0;
+    if (sprite_left < 0) { sprite_visible += sprite_left; sprite_left = 0; }
+    if (sprite_visible > SCREEN_W - sprite_left)
+        sprite_visible = SCREEN_W - sprite_left;
 
     /* Sprite colours can change in the copper list.  Compose each scanline
      * while that line's palette is live rather than colouring the whole
@@ -500,8 +878,19 @@ static void render_sprites_line(int line)
         };
         for (int which = 0; which < 2; which++) {
             if (!lines[which].active) continue;
+            if (getenv("BS_TRACE_SPR") &&
+                line == atoi(getenv("BS_TRACE_SPR")))
+                fprintf(stderr, "spr%d bank=%d c=[%03x %03x %03x] hstart=%d diwstrt=$%04x diwstop=$%04x "
+                        "ddfstrt=$%03x ddfstop=$%03x bplcon0=$%04x -> x=%d, "
+                        "display width=%d\n",
+                        pair * 2 + which, 16 + pair * 4,
+                        color[16 + pair * 4 + 1], color[16 + pair * 4 + 2],
+                        color[16 + pair * 4 + 3], lines[which].hstart, diwstrt,
+                        diwstop, ddfstrt, ddfstop, bplcon0,
+                        lines[which].hstart - (diwstrt & 0xff),
+                        ((diwstop & 0xff) | 0x100) - (diwstrt & 0xff));
             for (int bit = 0; bit < 16; bit++) {
-                int x = lines[which].hstart - (diwstrt & 0xff) + bit;
+                int x = lines[which].hstart - display_left + bit;
                 if (x < 0 || x >= SCREEN_W) continue;
                 pixels[which][x] =
                     ((lines[which].low >> (15 - bit)) & 1) |
@@ -509,7 +898,7 @@ static void render_sprites_line(int line)
             }
         }
         int bank = 16 + pair * 4;
-        for (int x = 0; x < SCREEN_W; x++) {
+        for (int x = sprite_left; x < sprite_left + sprite_visible; x++) {
             if (lines[1].attached) {
                 int index = pixels[0][x] | (pixels[1][x] << 2);
                 if (index) {
@@ -540,9 +929,11 @@ static uint8_t cia_read(uint32_t address)
             uint8_t value = 0xff;
             if (joy_state[0] & 0x10) value &= (uint8_t)~0x40;
             if (joy_state[1] & 0x10) value &= (uint8_t)~0x80;
+            trace_input("CIAA_PRA (fire)", value);
             return value;
         }
-        if (reg == 12) return kbd_sdr;
+        if (reg == 12) { trace_input("CIAA_SDR (keyboard)", kbd_sdr);
+                         return kbd_sdr; }
         return 0xff;
     }
     if (reg == 13) {
@@ -713,12 +1104,21 @@ static void ciab_tick(void)
             ticks = 0;
         }
         if (ciab.icr_mask & 1) {
-            /* The WHDLoad slave turns the game's low-memory callback at $8
-             * into the CIA-B timer service. Reproduce that wrapper here:
-             * acknowledge CIAB, then enter the callback as a normal JSR
-             * because both music handlers deliberately finish with RTS. */
-            if (audio_timer_pending < 4) audio_timer_pending++;
-            ciab.icr_flags = 0;
+            if (bs_loader_hooks) {
+                /* The WHDLoad slave turns the game's low-memory callback at
+                 * $8 into the CIA-B timer service. Reproduce that wrapper
+                 * here: acknowledge CIAB, then enter the callback as a normal
+                 * JSR because both music handlers deliberately finish with
+                 * RTS. */
+                if (audio_timer_pending < 4) audio_timer_pending++;
+                ciab.icr_flags = 0;
+            } else {
+                /* A title that booted itself installs a real level 6 handler
+                 * and acknowledges CIAB by reading ICR, so raise EXTER and
+                 * leave the flags standing for it to read. */
+                intreq |= 0x2000;
+                irq_update();
+            }
         }
     }
 }
@@ -964,19 +1364,64 @@ void bs_instr_hook(unsigned int pc)
         m68k_end_timeslice();
         return;
     }
+    if (whdload_active()) {
+        /* Hybris runs its own loader from the slave, and its game code lives
+         * low in memory where Battle Squadron's LOADER hooks would fire by
+         * coincidence.  Service resload instead. */
+        whdload_trap(pc);
+        return;
+    }
+    if (pc_hook) pc_hook(pc);
+    if (!bs_loader_hooks) return;
+    /* Battle Squadron's LOADER hooks are address-only, so any other title
+     * running low in memory would trip them by coincidence.  A disk-booted
+     * title turns them off. */
     if (pc == 0xead0) load_named_file();
     if (pc == 0x0370) stopped = true;       /* loader's terminal ILLEGAL */
+}
+
+static void update_display_top(void)
+{
+    display_top_valid = true;
+    if (getenv("BS_DISPLAY_TOP")) {      /* diagnostic: pin the origin */
+        display_top = atoi(getenv("BS_DISPLAY_TOP"));
+        return;
+    }
+
+    /* Horizontal: a window that fits sits at its true screen position; one
+     * wider than the buffer is centred on what it can show. */
+    int window_start = diwstrt & 0xff;
+    int window_width = (int)((diwstop & 0xff) | 0x100) - window_start;
+    if (window_width > SCREEN_W)
+        display_left = window_start + (window_width - SCREEN_W) / 2;
+    else
+        display_left = DISPLAY_ORIGIN_X;
+
+    /* Vertical: the fixed raster origin, so every window lands where it
+     * really is.  The room this leaves above a window is what shows sprites
+     * drawn over the border, which the hardware does not clip vertically.
+     * Only a window too tall to fit is pulled up. */
+    int window_top = (diwstrt >> 8) & 0xff;
+    int window_bottom = display_vstop();
+    display_top = DISPLAY_ORIGIN_Y;
+    if (window_bottom - display_top > SCREEN_H)
+        display_top = window_bottom - SCREEN_H;
+    if (display_top > window_top) display_top = window_top;
 }
 
 void amiga_run_frame(void)
 {
     if (video_enabled) {
+        update_display_top();
         uint32_t background = rgb4(color[0]);
         for (int pixel = 0; pixel < SCREEN_W * SCREEN_H; pixel++)
             framebuf[pixel] = background;
         copper_start();
     }
     for (cur_line = 0; cur_line < LINES_PER_FRAME && !stopped; cur_line++) {
+        memcpy(color_line_start, color, sizeof color_line_start);
+        color_change_count = 0;
+        cop_h = 0;
         if (video_enabled && (dmacon & 0x0280) == 0x0280)
             copper_run_line(cur_line);
         m68k_execute(CYCLES_PER_LINE);
@@ -985,6 +1430,7 @@ void amiga_run_frame(void)
             render_line(cur_line);
             if ((dmacon & 0x0220) == 0x0220)
                 render_sprites_line(cur_line);
+            paint_written_sprites(cur_line);
         }
     }
     while (audio_timer_pending > 0 && !stopped) {
@@ -992,10 +1438,13 @@ void amiga_run_frame(void)
         service_audio_timer();
     }
     kbd_pump();
+    display_top_valid = false;
     intreq |= 0x0020;
     irq_update();
     bs_frame_no++;
 }
+
+void amiga_stop(void) { stopped = true; }
 
 bool amiga_stopped(void) { return stopped; }
 
@@ -1030,6 +1479,16 @@ void amiga_report(void)
     }
 }
 
+void amiga_init_bare(void)
+{
+    /* Reset every chipset register exactly as amiga_init does, but load no
+     * title: the WHDLoad host supplies the slave and the entry vector. */
+    amiga_init(NULL);
+    m68k_init();
+    m68k_set_cpu_type(M68K_CPU_TYPE_68000);
+    m68k_pulse_reset();
+}
+
 void amiga_init(const char *directory)
 {
     memset(chip, 0, sizeof chip);
@@ -1049,6 +1508,7 @@ void amiga_init(const char *directory)
     kbd_pending = false;
     stopped = false;
     cur_line = 0;
+    display_top_valid = false;
     bs_frame_no = bs_blit_count = bs_file_load_count = 0;
     bs_copper_moves = bs_nonblack_pixels = bs_audio_writes = 0;
     audio_write_pos = audio_read_pos = 0;
@@ -1072,6 +1532,7 @@ void amiga_init(const char *directory)
     bltcon0 = bltcon1 = 0;
     blt_zero = true;
     snprintf(data_path, sizeof data_path, "%s", directory);
+    if (!directory) return;                 /* bare reset for the WHDLoad host */
     char loader[640];
     snprintf(loader, sizeof loader, "%s/LOADER", data_path);
     FILE *file = fopen(loader, "rb");
@@ -1088,6 +1549,44 @@ void amiga_init(const char *directory)
     m68k_init();
     m68k_set_cpu_type(M68K_CPU_TYPE_68000);
     m68k_pulse_reset();
+}
+
+void amiga_set_pc_hook(BsPcHook hook) { pc_hook = hook; }
+
+/* The framebuffer rows the display window actually occupies, so a frontend
+ * can put something of its own in the border without ever covering the
+ * picture. */
+void amiga_palette(uint16_t *out)
+{
+    for (int i = 0; i < 32; i++) out[i] = color[i];
+}
+
+void amiga_display_bounds(int *first_row, int *last_row)
+{
+    int top = ((diwstrt >> 8) & 0xff) - display_top;
+    int bottom = display_vstop() - display_top;
+    if (top < 0) top = 0;
+    if (bottom > SCREEN_H) bottom = SCREEN_H;
+    if (first_row) *first_row = top;
+    if (last_row) *last_row = bottom;
+}
+
+/* Display state, for diagnosing what a title programs frame by frame. */
+void amiga_display_state(uint16_t *out_bplcon0, uint16_t *out_dmacon,
+                         uint16_t *out_diwstrt, uint16_t *out_diwstop)
+{
+    if (out_bplcon0) *out_bplcon0 = bplcon0;
+    if (out_dmacon) *out_dmacon = dmacon;
+    if (out_diwstrt) *out_diwstrt = diwstrt;
+    if (out_diwstop) *out_diwstop = diwstop;
+}
+
+/* Return from a hooked subroutine as if it had run and RTS'd. */
+void amiga_return_from_hook(void)
+{
+    uint32_t stack = m68k_get_reg(NULL, M68K_REG_A7);
+    m68k_set_reg(M68K_REG_A7, stack + 4);
+    m68k_set_reg(M68K_REG_PC, rl(stack));
 }
 
 void amiga_enable_video(bool enabled)

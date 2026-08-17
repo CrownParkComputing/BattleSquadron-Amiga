@@ -5,8 +5,16 @@
 #include <stdint.h>
 
 #define CHIP_SIZE 0x80000
-#define SCREEN_W 320
-#define SCREEN_H 256
+/* A whole PAL raster wide, not just the textbook 320: Hybris opens a
+ * 336-pixel window at hpos 120 for its title picture and its credit
+ * scroller, and at 320 both lost eight pixels off each side. */
+#define SCREEN_W 352
+/* A whole PAL raster, not a textbook 256-line screen.  The buffer has to be
+ * tall enough that every window a title opens can be CENTRED in it with room
+ * above for sprites, which are not clipped to the display window: Hybris'
+ * game window is 254 lines with sprites 12 lines above it, its title picture
+ * is 200, and Battle Squadron's is 256. */
+#define SCREEN_H 288
 #define LINES_PER_FRAME 312
 #define CYCLES_PER_LINE 455
 
@@ -26,8 +34,30 @@ extern long bs_copper_moves;
 extern long bs_nonblack_pixels;
 extern long bs_audio_writes;
 extern uint8_t joy_state[2];
+/* Battle Squadron's LOADER hooks fire on bare PC values; a title booted from
+ * disk runs its own code there, so it clears this. */
+extern bool bs_loader_hooks;
+/* Lores-pixel nudge of the playfield relative to the sprites, for checking a
+ * title's DDFSTRT/DIWSTRT pairing against the real machine.  0 is the
+ * host's own derivation. */
+extern int bs_playfield_shift;
+
+/* A title-specific instruction hook: the host calls it with every PC, and
+ * the title's own module decides what to intercept.  Per-title addresses
+ * belong there, not in the chipset. */
+typedef void (*BsPcHook)(unsigned int pc);
+void amiga_set_pc_hook(BsPcHook hook);
+void amiga_display_state(uint16_t *bplcon0, uint16_t *dmacon,
+                         uint16_t *diwstrt, uint16_t *diwstop);
+void amiga_display_bounds(int *first_row, int *last_row);
+void amiga_palette(uint16_t *out);   /* 32 entries */
+void amiga_return_from_hook(void);
 
 void amiga_init(const char *data_dir);
+/* Reset the chipset without loading a title; the WHDLoad host supplies its
+ * own entry vector afterwards. */
+void amiga_init_bare(void);
+void amiga_stop(void);
 void amiga_run_frame(void);
 void amiga_enable_video(bool enabled);
 void amiga_key_event(uint8_t rawcode, bool up);

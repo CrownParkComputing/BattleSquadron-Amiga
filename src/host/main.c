@@ -73,8 +73,11 @@ int main(int argc, char **argv)
     const char *dump = NULL;
     bool mix_audio = false;
     bool autofire = false;
+    bool fire = false;
     long dump_state = 0;
     const char *audio_dump_path = NULL;
+    const char *frame_seq = NULL;
+    long frame_every = 250;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--data") && i + 1 < argc) {
@@ -97,6 +100,15 @@ int main(int argc, char **argv)
             dump_state = parse_frames(argv[++i]);
         } else if (!strcmp(argv[i], "--autofire")) {
             autofire = true;
+        } else if (!strcmp(argv[i], "--fire")) {
+            fire = true;
+        } else if (!strcmp(argv[i], "--dump-frame-seq") && i + 1 < argc) {
+            /* One run, many frames: re-running from zero for every capture
+             * costs minutes once the attract cycle is deep. */
+            frame_seq = argv[++i];
+            video_from = 0;
+        } else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) {
+            frame_every = parse_frames(argv[++i]);
         } else if (!strcmp(argv[i], "--dump-audio") && i + 1 < argc) {
             audio_dump_path = argv[++i];
             mix_audio = true;
@@ -111,7 +123,8 @@ int main(int argc, char **argv)
                     "usage: %s [--data DIR] [--frames N] "
                     "[--expect-files N] [--expect-blits N] "
                     "[--video|--video-from N] [--dump-frame FILE] "
-                    "[--mix-audio] [--dump-audio FILE] [--autofire] [--dump-state N] "
+                    "[--mix-audio] [--dump-audio FILE] [--autofire] [--fire] "
+                    "[--dump-state N] "
                     "[--selftest]\n",
                     argv[0]);
             return 2;
@@ -127,27 +140,48 @@ int main(int argc, char **argv)
         write_wav_header(audio_dump, 0);
     }
     while (bs_frame_no < frames && !amiga_stopped()) {
-        if (autofire)
+        /* BS_HOLD=<hex> holds a joystick state on player one, so a
+         * diagnostic run can drive the ship somewhere specific. */
+        {
+            const char *hold = getenv("BS_HOLD");
+            if (hold) joy_state[1] = (uint8_t)strtoul(hold, NULL, 16);
+        }
+        if (fire && !getenv("BS_HOLD"))
+            joy_state[1] = 0x10;
+        else if (autofire)
             joy_state[1] = (bs_frame_no % 100) < 20 ? 0x10 : 0;
         if (video_from >= 0 && bs_frame_no >= video_from)
             amiga_enable_video(true);
+        /* $10B0 copies the title's selection byte at 10965(A5) into player
+         * two's enable flag, and $10AA forces player one on, so clearing it
+         * before the game starts is a one-player start. */
+        if (getenv("BS_ONE_PLAYER")) chip[0xaad5] = 0;
         amiga_run_frame();
+        if (frame_seq && bs_frame_no % frame_every == 0) {
+            char path[700];
+            snprintf(path, sizeof path, "%s%05ld.ppm", frame_seq, bs_frame_no);
+            dump_frame(path);
+        }
         if (dump_state && bs_frame_no % dump_state == 0) {
             /* Reference values for the recompilation to diff against: the
              * player record and every live active-object slot. */
             printf("scroll=%u\n", (chip[0x8000+7204]<<8)|chip[0x8000+7205]);
-            printf("state frame=%ld t1078=%u p1 x=%u y=%u s38=%u c48=%u "
-                   "d49=%u inv52=%u lives56=%u wpn60=%u\n",
+            printf("state frame=%ld t1078=%u mode=%u p1 x=%u y=%u "
+                   "p2x=%u p2y=%u s38=%u c48=%u d49=%u inv52=%u "
+                   "lives56=%u wpn60=%u\n",
                    bs_frame_no,
                    (chip[0x1078] << 8) | chip[0x1079],
+                   (chip[0x8000 + 7228] << 8) | chip[0x8000 + 7229],
                    (chip[0x4e40] << 8) | chip[0x4e41],
                    (chip[0x4e42] << 8) | chip[0x4e43],
+                   (chip[0x4f4a] << 8) | chip[0x4f4b],
+                   (chip[0x4f4c] << 8) | chip[0x4f4d],
                    chip[0x4e3c + 38], chip[0x4e3c + 48], chip[0x4e3c + 49],
                    (chip[0x4e3c + 52] << 8) | chip[0x4e3c + 53],
                    chip[0x4e3c + 56],
                    (chip[0x4e3c + 60] << 8) | chip[0x4e3c + 61]);
             for (unsigned slot = 0; slot < 18; slot++) {
-                unsigned object = 0x2e040 + slot * 0x50;
+                unsigned object = 0x2e040 + slot * 0x40;
                 unsigned x = (chip[object] << 8) | chip[object + 1];
                 if (!x) continue;
                 printf("  obj %2u x=%4u y=%4u type=$%02X limit19=%3u "
@@ -157,12 +191,50 @@ int main(int argc, char **argv)
                        chip[object + 25], chip[object + 28],
                        chip[object + 30], chip[object + 33]);
             }
+            if (getenv("BS_DUMP_PLAYER")) {
+                printf("  praw");
+                for (unsigned b = 0; b < 128; b++)
+                    printf(" %02X", chip[0x4e3c + b]);
+                printf("\n");
+            }
+            for (unsigned slot = 0; slot < 16; slot++) {
+                unsigned effect = 0x4976 + slot * 20;
+                unsigned x = (chip[effect] << 8) | chip[effect + 1];
+                if (!x) continue;
+                printf("  eff %2u x=%4u y=%4u vx=%08X vy=%08X h16=%3u g17=%3u "
+                       "s18=%3u t19=%3u\n",
+                       slot, x, (chip[effect+4] << 8) | chip[effect+5],
+                       (chip[effect+8]<<24)|(chip[effect+9]<<16)|
+                       (chip[effect+10]<<8)|chip[effect+11],
+                       (chip[effect+12]<<24)|(chip[effect+13]<<16)|
+                       (chip[effect+14]<<8)|chip[effect+15],
+                       chip[effect+16], chip[effect+17],
+                       chip[effect+18], chip[effect+19]);
+            }
+            for (unsigned p = 0; p < 2; p++) {
+                unsigned player = p ? 0x4f46 : 0x4e3c;
+                for (unsigned slot = 0; slot < 12; slot++) {
+                    unsigned shot = player + 122 + slot * 12;
+                    unsigned x = (chip[shot] << 8) | chip[shot + 1];
+                    if (!x) continue;
+                    printf("  sht %u.%-2u x=%4u y=%4u vx=%04X vy=%04X "
+                           "dmg=%3d\n", p, slot, x,
+                           (chip[shot+2] << 8) | chip[shot+3],
+                           (chip[shot+4] << 8) | chip[shot+5],
+                           (chip[shot+6] << 8) | chip[shot+7],
+                           (int)(int8_t)chip[shot+11]);
+                }
+            }
             for (unsigned slot = 0; slot < 12; slot++) {
                 unsigned record = 0x2dc80 + slot * 0x50;
                 unsigned x = (chip[record] << 8) | chip[record + 1];
                 if (!x) continue;
+                char flags_text[20];
+                snprintf(flags_text, sizeof flags_text, " fl30=$%02X",
+                         chip[record + 30]);
                 printf("  hos %2u x=%4u y=%4u type=$%02X f29=%3u f63=%3u "
-                       "gfx36=$%06X gfx32=$%06X h50=%u w52=%u\n",
+                       "gfx36=$%06X gfx32=$%06X h50=%u w52=%u "
+                       "v12=$%08X f57=%u d62=%u%s\n",
                        slot, x, (chip[record + 4] << 8) | chip[record + 5],
                        chip[record + 31], chip[record + 29], chip[record + 63],
                        (chip[record+36]<<24)|(chip[record+37]<<16)|
@@ -170,7 +242,34 @@ int main(int argc, char **argv)
                        (chip[record+32]<<24)|(chip[record+33]<<16)|
                        (chip[record+34]<<8)|chip[record+35],
                        (chip[record+50]<<8)|chip[record+51],
-                       (chip[record+52]<<8)|chip[record+53]);
+                       (chip[record+52]<<8)|chip[record+53],
+                       (chip[record+12]<<24)|(chip[record+13]<<16)|
+                       (chip[record+14]<<8)|chip[record+15],
+                       chip[record+57], chip[record+62],
+                       getenv("BS_DUMP_FLAGS") ? flags_text : "");
+            }
+            if (getenv("BS_DUMP_FLAGS")) {
+                /* -26242(A5) selects the short $ACA half-frame over the full
+                 * $B34 one; -1792/-1791 are the pool pass selectors. */
+                printf("  flags h=%02X p1792=%02X p1791=%02X\n",
+                       chip[0x8000 - 26242], chip[0x8000 - 1792],
+                       chip[0x8000 - 1791]);
+            }
+            if (getenv("BS_DUMP_MAP")) {
+                unsigned p = 0x8000 + 7214;
+                unsigned cursor = ((unsigned)chip[p] << 24) |
+                                  ((unsigned)chip[p+1] << 16) |
+                                  ((unsigned)chip[p+2] << 8) | chip[p+3];
+                unsigned c = (cursor - 0x30) & 0x7ffff;
+                printf("  map progress=%04x g7212=%04x g7222=%04x g7228=%04x "
+                       "cursor=%06x words:",
+                       (chip[0x8000+7206] << 8) | chip[0x8000+7207],
+                       (chip[0x8000+7212] << 8) | chip[0x8000+7213],
+                       (chip[0x8000+7222] << 8) | chip[0x8000+7223],
+                       (chip[0x8000+7228] << 8) | chip[0x8000+7229], c);
+                for (int w = 0; w < 24; w++)
+                    printf(" %04x", (chip[c + w*2] << 8) | chip[c + w*2 + 1]);
+                printf("\n");
             }
             fflush(stdout);
         }

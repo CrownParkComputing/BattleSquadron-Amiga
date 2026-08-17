@@ -167,6 +167,11 @@ void bs_recomp_set_external_playfield_restore(BsRecomp *machine, int enabled)
     if (machine) machine->external_playfield_restore = enabled != 0;
 }
 
+void bs_recomp_set_music_enabled(BsRecomp *machine, int enabled)
+{
+    machine->music_enabled = enabled;
+}
+
 void bs_recomp_set_custom_write_hook(BsRecomp *machine,
                                      BsCustomWriteHook hook, void *user)
 {
@@ -937,6 +942,16 @@ static const uint32_t bs_gameplay_channels[4] = {
     0x252a4, 0x252e2, 0x25320, 0x2535e,
 };
 
+/* LODGAM $24CBE via the $246F6 table entry: disable the CIA-B timer that
+ * clocks the sequencer and stop all four audio DMA channels. */
+static void gameplay_audio_shutdown(BsRecomp *machine)
+{
+    bs_recomp_write16(machine, 0xdff09a, 0x4000);
+    bs_recomp_write8(machine, 0xbfde00, 0x00);
+    bs_recomp_write16(machine, 0xdff09a, 0xc000);
+    bs_recomp_write16(machine, 0xdff096, 0x000f);
+}
+
 /* LODGAM $24C6E via the $246F0 table entry.  Four overlays share that load
  * address, so the resident jump decides whether this is the audio system at
  * all.  It arms the CIA-B timer A interrupt that clocks the sequencer and
@@ -963,6 +978,457 @@ static int gameplay_audio_init(BsRecomp *machine)
     /* The closing MOVE.W writes $800F: N set, ZVC clear. */
     machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xffe0) | 0x08);
     return BS_RECOMP_OK;
+}
+
+/* ------------------------------------------------------------------------
+ * LODGAM $24856 / $24F34: the music sequencer.
+ *
+ * Audio bring-up already seeded the channels, armed the CIA-B timer and
+ * pointed $000008 at $24F34, but the dispatcher never executes guest
+ * interrupt code, so nothing ever restarted a channel and Paula stayed
+ * silent.  These two routines are that interrupt, driven from the frame loop
+ * at the raster boundary the reference's CIA tick lands on ($D00).
+ *
+ * Channel state (62 bytes, four at $252A4/$252E2/$25320/$2535E):
+ *   +0  L Paula register base   +32 W transpose       +48 B base note
+ *   +4  L instrument            +34 W repeat count    +49 B note duration
+ *   +8  L song base             +36 W period          +50 B slide target
+ *   +12 L pattern-list cursor   +38 W slide target    +51 B envelope reload
+ *   +16 L pattern cursor        +40 W envelope step   +52 B envelope count
+ *   +20 12B arpeggio table      +42 W vibrato pos     +53 B vibrato delay
+ *                               +44 W arpeggio pos    +54 B waveform count
+ *                               +46 W DMACON mask     +55 B slide speed
+ *                                                     +57 B volume
+ *                                                     +58 B retrigger
+ *                                                     +59 B attack phase
+ *                                                     +60 B attack count
+ *                                                     +61 B muted
+ * Instrument (32 bytes at $25504 + n*32):
+ *   +0 L sample {L address, W length}   +11 B vibrato speed  +14..17 levels
+ *   +4 L vibrato {L table, W length}    +12 B vibrato depth  +18..21 steps
+ *   +8 B retrigger  +9 B waveform speed +13 B vibrato delay  +22..24 waveform
+ *   +10 B waveform length
+ * Driver state at $251F8: +0 idle, +1 master volume, +2 fade, +3 saved,
+ *   +4 mute-all, +5 toggle, +6 W restore, +8 W start, +10 W pending.
+ */
+#define BS_MUSIC_STATE   UINT32_C(0x251f8)
+#define BS_MUSIC_PERIODS UINT32_C(0x25166)
+
+static void music_channel_update(BsRecomp *machine, uint32_t s)
+{
+    uint32_t a1 = bs_recomp_read32(machine, s + 4);
+    uint32_t a2 = bs_recomp_read32(machine, s + 16);
+    const uint32_t a3 = bs_recomp_read32(machine, s + 0);
+    const uint32_t g = BS_MUSIC_STATE;
+
+    if (bs_recomp_read8(machine, s + 61) == 0) {
+        if (bs_recomp_read8(machine, s + 59) != 0) {
+            if (bs_recomp_read8(machine, s + 60) != 0) {
+                bs_recomp_write8(machine, s + 60,
+                    (uint8_t)(bs_recomp_read8(machine, s + 60) - 1));
+            } else {
+                /* $2487A: the attack window closed, so hand Paula the
+                 * instrument's looping body. */
+                bs_recomp_write8(machine, s + 59, 0);
+                if (bs_recomp_read8(machine, g + 4) == 0) {
+                    bs_recomp_write8(machine, s + 58,
+                                     bs_recomp_read8(machine, a1 + 8));
+                    uint32_t sample = bs_recomp_read32(machine, a1);
+                    bs_recomp_write32(machine, a3,
+                                      bs_recomp_read32(machine, sample));
+                    bs_recomp_write16(machine, a3 + 4,
+                                      bs_recomp_read16(machine, sample + 4));
+                }
+            }
+        }
+        /* $2489E: DMA on for this channel. */
+        bs_recomp_write16(machine, 0xdff096,
+            (uint16_t)(0x8000 | bs_recomp_read16(machine, s + 46)));
+        if (bs_recomp_read8(machine, s + 58) != 0) {
+            bs_recomp_write8(machine, s + 58, 0);
+            bs_recomp_write16(machine, a3 + 4, 1);
+        }
+    }
+
+    if (bs_recomp_read8(machine, g + 4) != 0) return;
+
+    if (bs_recomp_read8(machine, s + 49) != 0) {
+        /* $248C8: a note is still sounding -- run its per-tick modulation. */
+        bs_recomp_write8(machine, s + 49,
+            (uint8_t)(bs_recomp_read8(machine, s + 49) - 1));
+        if (bs_recomp_read8(machine, s + 59) != 0) return;
+
+        if (bs_recomp_read8(machine, a1 + 9) != 0) {
+            /* $248F0: walk the waveform-modulation cursor over the sample. */
+            if (bs_recomp_read8(machine, s + 54) != 0) {
+                bs_recomp_write8(machine, s + 54,
+                    (uint8_t)(bs_recomp_read8(machine, s + 54) - 1));
+            } else {
+                bs_recomp_write8(machine, s + 54,
+                    (uint8_t)(bs_recomp_read8(machine, a1 + 9) - 1));
+                uint32_t sample = bs_recomp_read32(machine, a1);
+                /* SUB.B, so the borrow does not reach the high byte. */
+                uint16_t length = bs_recomp_read16(machine, sample + 6);
+                length = (uint16_t)((length & 0xff00) |
+                    ((length - bs_recomp_read8(machine, a1 + 10)) & 0xff));
+                uint32_t wave = bs_recomp_read32(machine, sample) +
+                                (int16_t)length;
+                uint8_t position = bs_recomp_read8(machine, a1 + 24);
+                bs_recomp_write8(machine, wave + position,
+                                 bs_recomp_read8(machine, a1 + 22));
+                int flip;
+                if ((int8_t)bs_recomp_read8(machine, a1 + 23) >= 0) {
+                    position++;
+                    flip = (uint8_t)(bs_recomp_read8(machine, a1 + 10) * 2) ==
+                           position;
+                } else {
+                    position--;
+                    flip = position == 0;
+                }
+                if (flip) {
+                    bs_recomp_write8(machine, a1 + 23,
+                        (uint8_t)~bs_recomp_read8(machine, a1 + 23));
+                    bs_recomp_write8(machine, a1 + 22,
+                        (uint8_t)~bs_recomp_read8(machine, a1 + 22));
+                }
+                bs_recomp_write8(machine, a1 + 24, position);
+            }
+        }
+
+        if (bs_recomp_read8(machine, s + 55) != 0) {
+            /* $24956: portamento towards the $81 target. */
+            uint16_t step = bs_recomp_read8(machine, s + 55);
+            uint16_t target = bs_recomp_read16(machine, s + 38);
+            uint16_t period = bs_recomp_read16(machine, s + 36);
+            if ((int16_t)(target - period) < 0) {
+                period = (uint16_t)(period - step);
+                if ((int16_t)(target - period) >= 0) period = target;
+            } else {
+                period = (uint16_t)(period + step);
+                if ((int16_t)(target - period) < 0) period = target;
+            }
+            bs_recomp_write16(machine, s + 36, period);
+            if (bs_recomp_read8(machine, s + 61) == 0)
+                bs_recomp_write16(machine, a3 + 6, period);
+        } else {
+            /* $2498A: otherwise step the twelve-entry arpeggio table. */
+            uint16_t index = bs_recomp_read16(machine, s + 44);
+            uint16_t note = (uint16_t)((bs_recomp_read8(machine, s + 20 + index)
+                + bs_recomp_read8(machine, s + 48)) & 0xff);
+            note = (uint16_t)(note + bs_recomp_read16(machine, s + 32));
+            uint16_t period = bs_recomp_read16(machine,
+                BS_MUSIC_PERIODS + (uint16_t)(note * 2));
+            bs_recomp_write16(machine, s + 36, period);
+            if (bs_recomp_read8(machine, s + 61) == 0)
+                bs_recomp_write16(machine, a3 + 6, period);
+            index = (uint16_t)(index - 1);
+            if ((int16_t)index < 0) index = (uint16_t)(index + 12);
+            bs_recomp_write16(machine, s + 44, index);
+        }
+
+        if (bs_recomp_read8(machine, a1 + 11) != 0) {
+            /* $249D6: vibrato, a signed table scaled by the depth. */
+            if (bs_recomp_read8(machine, s + 53) != 0) {
+                bs_recomp_write8(machine, s + 53,
+                    (uint8_t)(bs_recomp_read8(machine, s + 53) - 1));
+            } else {
+                uint16_t position = bs_recomp_read16(machine, s + 42);
+                uint32_t table = bs_recomp_read32(machine,
+                    bs_recomp_read32(machine, a1 + 4));
+                int16_t sample = (int8_t)bs_recomp_read8(machine,
+                                                          table + position);
+                int16_t depth = bs_recomp_read8(machine, a1 + 12);
+                uint16_t period = (uint16_t)(sample * depth +
+                    (int16_t)bs_recomp_read16(machine, s + 36));
+                if (bs_recomp_read8(machine, s + 61) == 0)
+                    bs_recomp_write16(machine, a3 + 6, period);
+                uint16_t next = (uint16_t)(position -
+                    bs_recomp_read8(machine, a1 + 11));
+                bs_recomp_write16(machine, s + 42, next);
+                if ((int16_t)next < 0) {
+                    uint32_t vibrato = bs_recomp_read32(machine, a1 + 4);
+                    bs_recomp_write16(machine, s + 42, (uint16_t)(
+                        bs_recomp_read16(machine, vibrato + 4) * 2));
+                }
+            }
+        }
+
+        /* $24A18: the volume envelope, four levels each with its own step. */
+        uint8_t count = (uint8_t)(bs_recomp_read8(machine, s + 52) - 1);
+        bs_recomp_write8(machine, s + 52, count);
+        if ((int8_t)count >= 0) return;
+        bs_recomp_write8(machine, s + 52, bs_recomp_read8(machine, s + 51));
+        uint16_t stage = bs_recomp_read16(machine, s + 40);
+        uint8_t level = bs_recomp_read8(machine, a1 + 14 + stage);
+        uint8_t rate = bs_recomp_read8(machine, a1 + 18 + stage);
+        uint8_t volume = bs_recomp_read8(machine, s + 57);
+        int advance = 0;
+        if ((int8_t)(uint8_t)(level - volume) < 0) {
+            volume = (uint8_t)(volume - rate);
+            if ((int8_t)(uint8_t)(level - volume) >= 0) {
+                volume = level;
+                advance = 1;
+            }
+        } else {
+            uint8_t master = bs_recomp_read8(machine, g + 1);
+            volume = (uint8_t)(volume + rate);
+            if ((int8_t)(uint8_t)(volume - master) >= 0) {
+                volume = master;
+                advance = 1;
+            } else if ((int8_t)(uint8_t)(level - volume) < 0) {
+                volume = level;
+                advance = 1;
+            }
+        }
+        if (advance && stage != 3) stage = (uint16_t)(stage + 1);
+        bs_recomp_write16(machine, s + 40, stage);
+        bs_recomp_write8(machine, s + 57, volume);
+        if (bs_recomp_read8(machine, s + 61) == 0)
+            bs_recomp_write16(machine, a3 + 8, (uint16_t)(volume & 0x3f));
+        return;
+    }
+
+    /* $24A80: the note ended, so read commands until one produces a note. */
+    if (bs_recomp_read8(machine, g + 4) != 0) return;
+    bs_recomp_write8(machine, s + 55, 0);
+    uint8_t delay = bs_recomp_read8(machine, a1 + 13);
+    if (delay != 0)
+        bs_recomp_write8(machine, s + 53, (uint8_t)((delay << 2) - 1));
+
+    for (int guard = 0; guard < 64; guard++) {
+        if (bs_recomp_read8(machine, a2) == 0x80) {
+            /* Select an arpeggio table. */
+            bs_recomp_write16(machine, s + 44, 0);
+            uint32_t entry = UINT32_C(0x2545c) +
+                (uint32_t)bs_recomp_read8(machine, a2 + 1) * 12;
+            bs_recomp_write32(machine, s + 20,
+                              bs_recomp_read32(machine, entry));
+            bs_recomp_write32(machine, s + 24,
+                              bs_recomp_read32(machine, entry + 4));
+            bs_recomp_write32(machine, s + 28,
+                              bs_recomp_read32(machine, entry + 8));
+            a2 += 2;
+        }
+        if (bs_recomp_read8(machine, a2) == 0x81) {
+            /* Portamento to a note over a given number of ticks. */
+            bs_recomp_write16(machine, s + 40, 0);
+            uint16_t note = bs_recomp_read8(machine, a2 + 1);
+            bs_recomp_write8(machine, s + 50, (uint8_t)note);
+            note = (uint16_t)(note + bs_recomp_read16(machine, s + 32));
+            bs_recomp_write16(machine, s + 38, bs_recomp_read16(machine,
+                BS_MUSIC_PERIODS + (uint16_t)(note * 2)));
+            bs_recomp_write8(machine, s + 55,
+                             bs_recomp_read8(machine, a2 + 2));
+            bs_recomp_write8(machine, s + 49, (uint8_t)(
+                (bs_recomp_read8(machine, a2 + 3) << 2) - 1));
+            a2 += 4;
+            goto store_and_pitch;
+        }
+        if (bs_recomp_read8(machine, a2) == 0x82) {
+            /* Change instrument, and hand Paula its sample immediately. */
+            bs_recomp_write8(machine, s + 57, 0);
+            bs_recomp_write16(machine, s + 40, 0);
+            a1 = UINT32_C(0x25504) +
+                 ((uint32_t)bs_recomp_read8(machine, a2 + 1) << 5);
+            bs_recomp_write32(machine, s + 4, a1);
+            if (bs_recomp_read8(machine, s + 61) == 0 &&
+                bs_recomp_read8(machine, s + 59) == 0) {
+                bs_recomp_write16(machine, 0xdff096,
+                                  bs_recomp_read16(machine, s + 46));
+                uint32_t sample = bs_recomp_read32(machine, a1);
+                bs_recomp_write32(machine, a3,
+                                  bs_recomp_read32(machine, sample));
+                bs_recomp_write16(machine, a3 + 4,
+                                  bs_recomp_read16(machine, sample + 4));
+            }
+            a2 += 2;
+        }
+        if (bs_recomp_read8(machine, a2) == 0x83) {
+            /* End of song. */
+            bs_recomp_write8(machine, g + 0, 1);
+            bs_recomp_write16(machine, g + 8, 0);
+            bs_recomp_write16(machine, g + 6, 1);
+            return;
+        }
+        if (bs_recomp_read8(machine, a2) == 0x84) {
+            bs_recomp_write8(machine, s + 51,
+                             bs_recomp_read8(machine, a2 + 1));
+            a2 += 2;
+        }
+        if ((int8_t)bs_recomp_read8(machine, a2) >= 0) break;
+
+        /* $24B82: end of a pattern -- repeat it, or step the pattern list
+         * and wrap to the song start when the list terminates. */
+        uint32_t entry;
+        if (bs_recomp_read16(machine, s + 34) != 0) {
+            bs_recomp_write16(machine, s + 34,
+                (uint16_t)(bs_recomp_read16(machine, s + 34) - 1));
+            entry = bs_recomp_read32(machine, s + 12);
+            a2 = bs_recomp_read32(machine, entry);
+            bs_recomp_write32(machine, s + 16, a2);
+            bs_recomp_write16(machine, s + 32,
+                              bs_recomp_read16(machine, entry + 6));
+            continue;
+        }
+        bs_recomp_write32(machine, s + 12,
+                          bs_recomp_read32(machine, s + 12) + 12);
+        entry = bs_recomp_read32(machine, s + 12);
+        if ((int8_t)bs_recomp_read8(machine, entry) < 0) {
+            entry = bs_recomp_read32(machine, s + 8);
+            bs_recomp_write32(machine, s + 12, entry);
+        }
+        a2 = bs_recomp_read32(machine, entry);
+        bs_recomp_write32(machine, s + 16, a2);
+        bs_recomp_write16(machine, s + 32,
+                          bs_recomp_read16(machine, entry + 6));
+        bs_recomp_write16(machine, s + 34,
+            (uint16_t)(bs_recomp_read16(machine, entry + 10) - 1));
+    }
+
+    /* $24BDC: a note.  A zero duration byte only retunes; otherwise the note
+     * is struck and the sample restarted. */
+    uint8_t duration = bs_recomp_read8(machine, a2 + 1);
+    if (duration == 0) {
+        uint16_t note = bs_recomp_read8(machine, a2);
+        bs_recomp_write8(machine, s + 48, (uint8_t)note);
+        note = (uint16_t)(note + bs_recomp_read16(machine, s + 32));
+        bs_recomp_write16(machine, s + 36, bs_recomp_read16(machine,
+            BS_MUSIC_PERIODS + (uint16_t)(note * 2)));
+        a2 += 2;
+        bs_recomp_write32(machine, s + 16, a2);
+        return;
+    }
+    bs_recomp_write8(machine, s + 49, (uint8_t)((duration << 2) - 1));
+    bs_recomp_write16(machine, s + 40, 0);
+    uint16_t note = bs_recomp_read8(machine, a2);
+    bs_recomp_write8(machine, s + 48, (uint8_t)note);
+    note = (uint16_t)(note + bs_recomp_read16(machine, s + 32));
+    bs_recomp_write16(machine, s + 36, bs_recomp_read16(machine,
+        BS_MUSIC_PERIODS + (uint16_t)(note * 2)));
+    if (bs_recomp_read8(machine, s + 61) != 0 ||
+        bs_recomp_read8(machine, s + 59) != 0) {
+        a2 += 2;
+        bs_recomp_write32(machine, s + 16, a2);
+        return;
+    }
+    bs_recomp_write16(machine, 0xdff096, bs_recomp_read16(machine, s + 46));
+    uint32_t sample = bs_recomp_read32(machine, a1);
+    bs_recomp_write32(machine, a3, bs_recomp_read32(machine, sample));
+    bs_recomp_write16(machine, a3 + 4, bs_recomp_read16(machine, sample + 4));
+    a2 += 2;
+    if (bs_recomp_read8(machine, a1 + 8) != 0)
+        bs_recomp_write8(machine, s + 58, 1);
+
+store_and_pitch:
+    bs_recomp_write32(machine, s + 16, a2);
+    if (bs_recomp_read8(machine, s + 61) == 0)
+        bs_recomp_write16(machine, a3 + 6, bs_recomp_read16(machine, s + 36));
+}
+
+/* LODGAM $24F34: the CIA-B timer interrupt.  It honours a pending mute
+ * toggle, runs a fade, then either ticks all four channels or services a
+ * start/restore request by swapping the channel bank at $24E34. */
+static void music_interrupt(BsRecomp *machine)
+{
+    const uint32_t g = BS_MUSIC_STATE;
+    const uint32_t *channels = bs_gameplay_channels;
+
+    if (bs_recomp_read16(machine, 0x24e32) != 0) {
+        bs_recomp_write16(machine, 0x24e32, 0);
+        uint8_t toggled = (uint8_t)(bs_recomp_read8(machine, g + 4) ^ 1);
+        bs_recomp_write8(machine, g + 4, toggled);
+        if (toggled != 0)
+            for (int i = 0; i < 4; i++)
+                bs_recomp_write16(machine, 0xdff0a0 + i * 16 + 8, 0);
+    }
+
+    if (bs_recomp_read8(machine, g + 0) == 0) {
+        if (bs_recomp_read8(machine, g + 2) != 0) {
+            /* $24F78: fade the master volume down one step every third tick,
+             * then silence everything when it reaches zero. */
+            if (bs_recomp_read8(machine, g + 1) != 0) {
+                uint8_t tick = (uint8_t)(bs_recomp_read8(machine, 0x251f6) - 1);
+                bs_recomp_write8(machine, 0x251f6, tick);
+                if ((int8_t)tick < 0) {
+                    bs_recomp_write8(machine, 0x251f6, 2);
+                    bs_recomp_write8(machine, g + 1,
+                        (uint8_t)(bs_recomp_read8(machine, g + 1) - 1));
+                }
+            } else {
+                bs_recomp_write8(machine, g + 0, 1);
+                bs_recomp_write8(machine, g + 1,
+                                 bs_recomp_read8(machine, g + 3));
+                bs_recomp_write8(machine, g + 2, 0);
+                bs_recomp_write8(machine, g + 3, 0);
+                for (int i = 0; i < 4; i++)
+                    bs_recomp_write16(machine, 0xdff0a0 + i * 16 + 8, 0);
+                return;
+            }
+        }
+        for (int i = 0; i < 4; i++)
+            music_channel_update(machine, channels[i]);
+        return;
+    }
+
+    if (bs_recomp_read16(machine, g + 8) != 0) {
+        /* $24FEC: a new track.  Save the live bank, then re-seed each
+         * channel from the requested song's four pattern lists. */
+        for (unsigned word = 0; word < 128; word++)
+            bs_recomp_write16(machine, 0x24e34 + word * 2,
+                bs_recomp_read16(machine, channels[0] + word * 2));
+        bs_recomp_write16(machine, 0xdff096, 0x000f);
+        uint16_t track = (uint16_t)(bs_recomp_read16(machine, g + 8) & 0x0f);
+        uint32_t songs = g + 12 + (uint32_t)((track - 1) << 4);
+        for (int i = 0; i < 4; i++) {
+            bs_recomp_write32(machine, channels[i] + 8,
+                              bs_recomp_read32(machine, songs + i * 4));
+            init_gameplay_channel(machine, channels[i]);
+        }
+        bs_recomp_write8(machine, g + 0, 0);
+        bs_recomp_write16(machine, g + 8, 0);
+        return;
+    }
+
+    if (bs_recomp_read16(machine, g + 6) == 0) return;
+
+    /* $2506E: restore the bank saved above and hand Paula each channel's
+     * sample, period and volume again. */
+    for (unsigned word = 0; word < 128; word++)
+        bs_recomp_write16(machine, channels[0] + word * 2,
+                          bs_recomp_read16(machine, 0x24e34 + word * 2));
+    for (int i = 0; i < 4; i++) {
+        uint32_t s = channels[i];
+        bs_recomp_write16(machine, 0xdff096,
+                          bs_recomp_read16(machine, s + 46));
+        uint32_t paula = bs_recomp_read32(machine, s);
+        bs_recomp_write16(machine, paula + 6,
+                          bs_recomp_read16(machine, s + 36));
+        uint32_t sample = bs_recomp_read32(machine,
+                              bs_recomp_read32(machine, s + 4));
+        bs_recomp_write32(machine, paula, bs_recomp_read32(machine, sample));
+        bs_recomp_write16(machine, paula + 4,
+                          bs_recomp_read16(machine, sample + 4));
+        bs_recomp_write16(machine, paula + 8,
+                          bs_recomp_read8(machine, s + 57));
+    }
+    bs_recomp_write16(machine, g + 10, 0);
+    bs_recomp_write16(machine, g + 6, 0);
+    bs_recomp_write8(machine, g + 0, 0);
+}
+
+void bs_recomp_music_tick(BsRecomp *machine)
+{
+    if (!machine || !machine->music_enabled) return;
+    /* The sequencer, its driver state at $251F8 and the instrument table at
+     * $25504 all live in LODGAM.  Before that overlay is resident those
+     * addresses hold unrelated memory -- ticking then read a mute flag of 77
+     * and an instrument pointer of $170AF8EC, and wrote hundreds of garbage
+     * DMACON values.  Only run once the $246F0 vector proves it is installed,
+     * exactly as gameplay_audio_init checks. */
+    if (bs_recomp_read16(machine, 0x246f0) != 0x4ef9 ||
+        bs_recomp_read32(machine, 0x246f2) != UINT32_C(0x00024c6e))
+        return;
+    music_interrupt(machine);
 }
 
 /* LODGAM $24DDE.  The $2471A table entry reaches it with track one.  The
@@ -1186,7 +1652,10 @@ static uint32_t init_enemy_projectile(BsRecomp *machine, uint32_t record,
     const uint32_t base = machine->cpu.a[5];
     uint32_t descriptor = 0xcd7a + (uint32_t)type * 0x20;
     uint16_t x = relative_x;
-    if (x >= 0x0320)
+    /* LAB_7628: CMPI.W #$0320,D1 + BLT is a SIGNED comparison, so a
+     * relative x with the top bit set (e.g. 0xFFFD = -3) must take the
+     * scroll-add branch, not the screen-wrap branch. */
+    if ((int16_t)x >= 0x0320)
         x = (uint16_t)(x - 0x03e8 + 0x0100);
     else
         x = (uint16_t)(x + bs_recomp_read16(machine, base + 7204));
@@ -1305,6 +1774,21 @@ static void play_sound_effect(BsRecomp *machine, uint16_t sound)
     bs_recomp_write16(machine, paula + 4, bs_recomp_read16(machine, entry + 4));
     bs_recomp_write16(machine, paula + 6, bs_recomp_read16(machine, entry + 6));
     bs_recomp_write16(machine, paula + 8, bs_recomp_read16(machine, entry + 8));
+    /* The native preview has no guest CIA sequencer yet.  Expose the same
+     * descriptor through the platform hook so short gameplay SFX are audible
+     * immediately, while the Paula state above remains the ABI-visible one. */
+    if (machine->audio_sample_hook) {
+        BsAudioSampleEvent event = {
+            .address = bs_recomp_read32(machine, entry),
+            .length_words = bs_recomp_read16(machine, entry + 4),
+            .period = bs_recomp_read16(machine, entry + 6),
+            /* AUDxVOL is a word; its meaningful 0..64 level is the low byte,
+             * so reading +8 handed the platform a volume of zero. */
+            .volume = (uint8_t)bs_recomp_read16(machine, entry + 8),
+            .channel = (uint8_t)((sound & 0x30) >> 4),
+        };
+        machine->audio_sample_hook(machine->audio_sample_user, &event);
+    }
 }
 
 static int update_type20_mode0_pool(BsRecomp *machine)
@@ -1949,6 +2433,120 @@ static void start_projectile_explosion(BsRecomp *machine, uint32_t projectile)
     bs_recomp_write16(machine, projectile + 50, 0x0020);
 }
 
+/* LAB_491C: choose the steering direction for the type-8 homing missile.
+ * The caller stores the missile position in -14398/-14396; each player's
+ * centre (x + $c, y + $10) is compared against it to yield direction bits
+ * (bit0/bit1 = player one lies left/above, bit2/bit3 = player two) plus the
+ * two Manhattan distances used to pick the nearer player.  All arithmetic
+ * is 16-bit with a NEG.W absolute value. */
+static uint8_t homing_directions(BsRecomp *machine, uint16_t stored_x,
+                                 uint16_t stored_y,
+                                 uint16_t *player_one_distance,
+                                 uint16_t *player_two_distance,
+                                 uint16_t *components)
+{
+    const uint32_t base = machine->cpu.a[5];
+    uint8_t d7 = 0;
+
+    uint16_t d1 = (uint16_t)(bs_recomp_read16(machine, base - 12736) + 0x000c) -
+                  stored_x;
+    if ((int16_t)d1 < 0) { d7 |= 0x01; d1 = (uint16_t)(-(int16_t)d1); }
+    uint16_t d2 = (uint16_t)(bs_recomp_read16(machine, base - 12734) + 0x0010) -
+                  stored_y;
+    if ((int16_t)d2 < 0) { d7 |= 0x02; d2 = (uint16_t)(-(int16_t)d2); }
+    *player_one_distance = (uint16_t)(d1 + d2);
+
+    uint16_t d3 = (uint16_t)(bs_recomp_read16(machine, base - 12470) + 0x000c) -
+                  stored_x;
+    if ((int16_t)d3 < 0) { d7 |= 0x04; d3 = (uint16_t)(-(int16_t)d3); }
+    uint16_t d4 = (uint16_t)(bs_recomp_read16(machine, base - 12468) + 0x0010) -
+                  stored_y;
+    if ((int16_t)d4 < 0) { d7 |= 0x08; d4 = (uint16_t)(-(int16_t)d4); }
+    *player_two_distance = (uint16_t)(d3 + d4);
+
+    /* $486C's caller also needs D1..D4 themselves, not just the sums, to
+     * build an aimed velocity. */
+    if (components) {
+        components[0] = d1;
+        components[1] = d2;
+        components[2] = d3;
+        components[3] = d4;
+    }
+    return d7;
+}
+
+/* LAB_9912: derive the missile's 16-way sprite index from its velocity.
+ * The original divides -vy by vx >> 6 (a logical shift), forcing a minimum
+ * divisor of $40, and maps the quotient through a signed threshold table
+ * before adding an $8 half-turn when vx is negative. */
+static uint8_t homing_sprite_angle(BsRecomp *machine, uint32_t projectile)
+{
+    uint32_t vx = bs_recomp_read32(machine, projectile + 8);
+    uint32_t vy = bs_recomp_read32(machine, projectile + 12);
+    int16_t divisor = (int16_t)(vx >> 6);
+    uint8_t d5 = 0;
+    if (divisor < 0) {
+        d5 = 8;
+    } else if (divisor == 0) {
+        divisor = 0x40;
+    }
+    int16_t quotient = (int16_t)(-(int32_t)vy / divisor);
+    uint8_t d4;
+    if (quotient >= 0) {
+        if (quotient >= 0x142) d4 = 0;
+        else if (quotient >= 0x60) d4 = 1;
+        else if (quotient >= 0x2b) d4 = 2;
+        else if (quotient >= 0x0d) d4 = 3;
+        else d4 = 4;
+    } else {
+        if (quotient >= -13) d4 = 4;
+        else if (quotient >= -43) d4 = 5;
+        else if (quotient >= -96) d4 = 6;
+        else if (quotient >= -322) d4 = 7;
+        else d4 = 8;
+    }
+    return (uint8_t)((d4 + d5) & 0x0f);
+}
+
+/* LAB_5B3E: queue the missile's five-plane debris puff and its trailing
+ * mask copy.  The original programs the blitter registers directly through
+ * A6; the identical values are written here so the architectural register
+ * state matches.  The preview renders sprites as direct bitmap writes, so
+ * this particular smoke trail is register-state-only there. */
+static void queue_missile_debris_blit(BsRecomp *machine, uint16_t x,
+                                      uint16_t y)
+{
+    const uint32_t base = machine->cpu.a[5];
+    uint16_t d1 = (uint16_t)(x - 0x0100);
+    uint16_t d2 = (uint16_t)(y - 0x0100);
+    bs_recomp_write16(machine, machine->cpu.a[6] + 100, 0x002a);
+    bs_recomp_write16(machine, machine->cpu.a[6] + 102, 0);
+    bs_recomp_write32(machine, machine->cpu.a[6] + 68, 0xffffffff);
+    uint16_t d3 = (uint16_t)((d1 >> 4) | (d1 << 12));
+    d3 = (uint16_t)((d3 & 0xf000) ^ 0xf000);
+    d3 = (uint16_t)(d3 | 0x09f0);
+    bs_recomp_write16(machine, machine->cpu.a[6] + 64, d3);
+    uint32_t a1 = 0x0000577e;
+    d1 = (uint16_t)(d1 + 0x0030);
+    d2 = (uint16_t)(d2 + 0x0030);
+    uint16_t d2_scaled = (uint16_t)(d2 * 0x0030u);
+    uint32_t a3 = bs_recomp_read32(machine, base + 7208);
+    a3 -= 0x0906;
+    a3 += (int16_t)(d2_scaled + (d1 >> 3));
+    for (int plane = 0; plane < 5; plane++) {
+        bs_recomp_write32(machine, machine->cpu.a[6] + 80, a3);
+        bs_recomp_write32(machine, machine->cpu.a[6] + 84, a1);
+        bs_recomp_write16(machine, machine->cpu.a[6] + 88, 0x0803);
+        a3 += 0x6000;
+        a1 += 0x00c0;
+    }
+    bs_recomp_write32(machine, machine->cpu.a[6] + 84, 0x0000577e);
+    bs_recomp_write32(machine, machine->cpu.a[6] + 80, 0x00005780);
+    bs_recomp_write16(machine, machine->cpu.a[6] + 100, 0x0002);
+    bs_recomp_write16(machine, machine->cpu.a[6] + 64, 0x09f0);
+    bs_recomp_write16(machine, machine->cpu.a[6] + 88, 0x2802);
+}
+
 static int update_enemy_projectile_pool(BsRecomp *machine)
 {
     const uint32_t base = machine->cpu.a[5];
@@ -2203,20 +2801,37 @@ explosion_countdown:
                             ? (uint16_t)(player_two_x - x)
                             : (uint16_t)(x - player_two_x);
                         uint16_t target_x;
-                        if (distance_one >= distance_two) {
+                        /* CMP.W D2,D1; BLT.S is a signed word compare. */
+                        if ((int16_t)distance_one >= (int16_t)distance_two) {
+                            /* LAB_9682 starts with player two.  Keep it while
+                             * player two is at or below player one, or within
+                             * 30 pixels of the shot's aim line; only then does
+                             * the original switch the target to player one. */
                             target_x = player_two_x;
-                            if (player_two_y < player_one_y)
-                                target_x = player_one_x;
+                            if (player_two_y < player_one_y) {
+                                uint16_t probe =
+                                    (uint16_t)(player_two_y + 0x1e);
+                                if (probe < y) target_x = player_one_x;
+                            }
                         } else {
+                            /* LAB_96A0 is the symmetric player-one path. */
                             target_x = player_one_x;
-                            if (player_one_y < player_two_y)
-                                target_x = player_two_x;
+                            if (player_one_y < player_two_y) {
+                                uint16_t probe =
+                                    (uint16_t)(player_one_y + 0x1e);
+                                if (probe < y) target_x = player_two_x;
+                            }
                         }
                         int32_t maximum = (int32_t)bs_recomp_read32(
                             machine, machine->cpu.a[2] + 16);
                         int32_t acceleration = (int32_t)bs_recomp_read32(
                             machine, machine->cpu.a[2] + 20);
-                        if (target_x >= x) {
+                        /* LAB_96BC: accelerate toward the target until the
+                         * velocity exactly reaches +/-maximum, matching the
+                         * original's BEQ comparisons (no overshoot clamp).
+                         * The original uses a signed word compare (BLT), so
+                         * mirror that with int16_t casts. */
+                        if ((int16_t)target_x >= (int16_t)x) {
                             if (velocity != maximum)
                                 velocity += acceleration;
                         } else {
@@ -2701,10 +3316,13 @@ explosion_countdown:
                     machine->cpu.a[3] = machine->cpu.a[2] + frame_stride -
                         bs_recomp_read16(machine, projectile + 44);
                 } else if (type == 8) {
-                    /* LAB_8664: accelerating homing projectile.  The
-                     * original chooses one of the live players, steers each
-                     * fixed-point velocity component toward a capped value,
-                     * and periodically raises an impact/debris marker. */
+                    /* LAB_8664: homing missile.  During its launch delay it
+                     * steers toward the nearer player (LAB_491C); once the
+                     * delay expires it flies on a fixed heading and is freed
+                     * when it leaves the visible horizontal band.  LAB_9912
+                     * picks the 16-way sprite from the velocity, and on
+                     * marker frames it raises a debris puff instead of the
+                     * plain missile frame. */
                     uint8_t damage = bs_recomp_read8(machine,
                                                       projectile + 62);
                     if (damage != 0) {
@@ -2723,31 +3341,46 @@ explosion_countdown:
 
                     uint16_t x = bs_recomp_read16(machine, projectile);
                     y = bs_recomp_read16(machine, projectile + 4);
-                    uint16_t target_x = bs_recomp_read16(
-                        machine, base - 12736);
-                    uint16_t target_y = bs_recomp_read16(
-                        machine, base - 12734);
+                    uint8_t direction;
                     uint8_t delay = bs_recomp_read8(machine,
                                                      projectile + 28);
-                    if (delay != 0) {
+                    if (delay == 0) {
+                        /* LAB_8686: launched phase.  Free the missile once
+                         * it leaves the visible band, then steer from the
+                         * flags byte plus the $8F90 launch hint. */
+                        uint16_t scroll = bs_recomp_read16(machine,
+                                                            base + 7204);
+                        int16_t left = (int16_t)(scroll - 0x20);
+                        if (left >= (int16_t)x ||
+                            (int16_t)(left + 0x140) < (int16_t)x) {
+                            bs_recomp_write16(machine, projectile, 0);
+                            goto next_projectile;
+                        }
+                        direction = bs_recomp_read8(machine,
+                                                     projectile + 30);
+                        uint16_t hint = (uint16_t)((
+                            bs_recomp_read16(machine, base - 28552) & 0xff) ^
+                            0xff) + 0x0100;
+                        if ((int16_t)hint < (int16_t)y) direction |= 0x02;
+                    } else {
+                        /* LAB_86C4: homing phase.  Count the delay down,
+                         * remember the launch heading in the flags byte,
+                         * then pick the nearer of the two players. */
                         delay--;
                         bs_recomp_write8(machine, projectile + 28, delay);
-                        uint16_t player_two_x = bs_recomp_read16(
-                            machine, base - 12470);
-                        uint16_t player_two_y = bs_recomp_read16(
-                            machine, base - 12468);
-                        uint32_t first_distance =
-                            (target_x >= x ? target_x - x : x - target_x) +
-                            (target_y >= y ? target_y - y : y - target_y);
-                        uint32_t second_distance =
-                            (player_two_x >= x ? player_two_x - x
-                                               : x - player_two_x) +
-                            (player_two_y >= y ? player_two_y - y
-                                               : y - player_two_y);
-                        if (second_distance < first_distance) {
-                            target_x = player_two_x;
-                            target_y = player_two_y;
-                        }
+                        if (delay == 0 && (int16_t)x <= 0x01b0)
+                            bs_recomp_write8(machine, projectile + 30,
+                                (uint8_t)(bs_recomp_read8(machine,
+                                    projectile + 30) | 0x01));
+                        bs_recomp_write16(machine, base - 14398, x);
+                        bs_recomp_write16(machine, base - 14396, y);
+                        uint16_t player_one_distance, player_two_distance;
+                        direction = homing_directions(
+                            machine, x, y, &player_one_distance,
+                            &player_two_distance, NULL);
+                        if ((int16_t)player_one_distance >=
+                            (int16_t)player_two_distance)
+                            direction >>= 2;
                     }
 
                     int32_t maximum = (int32_t)bs_recomp_read32(
@@ -2758,14 +3391,17 @@ explosion_countdown:
                         machine, projectile + 8);
                     int32_t vy = (int32_t)bs_recomp_read32(
                         machine, projectile + 12);
-                    if (target_x < x) {
-                        if (vx > -maximum) vx -= acceleration;
-                    } else if (vx < maximum) {
+                    /* LAB_86EC: accelerate each axis toward the chosen
+                     * heading, stopping only once the component passes its
+                     * signed cap. */
+                    if (direction & 0x01) {
+                        if (vx >= -maximum) vx -= acceleration;
+                    } else if (vx <= maximum) {
                         vx += acceleration;
                     }
-                    if (target_y < y) {
-                        if (vy > -maximum) vy -= acceleration;
-                    } else if (vy < maximum) {
+                    if (direction & 0x02) {
+                        if (vy >= -maximum) vy -= acceleration;
+                    } else if (vy <= maximum) {
                         vy += acceleration;
                     }
                     bs_recomp_write32(machine, projectile + 8,
@@ -2773,19 +3409,11 @@ explosion_countdown:
                     bs_recomp_write32(machine, projectile + 12,
                                       (uint32_t)vy);
 
-                    int32_t abs_x = vx < 0 ? -vx : vx;
-                    int32_t abs_y = vy < 0 ? -vy : vy;
-                    uint8_t sprite;
-                    if (abs_x > abs_y * 2)
-                        sprite = vx < 0 ? 8 : 0;
-                    else if (abs_y > abs_x * 2)
-                        sprite = vy < 0 ? 12 : 4;
-                    else if (vx >= 0)
-                        sprite = vy < 0 ? 14 : 2;
-                    else
-                        sprite = vy < 0 ? 10 : 6;
+                    /* LAB_9912: 16-way sprite index from the velocity. */
+                    uint8_t sprite = homing_sprite_angle(machine, projectile);
                     bs_recomp_write8(machine, projectile + 63, sprite);
 
+                    /* LAB_8730/LAB_8744: periodic impact/debris marker. */
                     uint8_t timer = bs_recomp_read8(machine,
                                                      projectile + 27);
                     if (bs_recomp_read8(machine, projectile + 26) == 0) {
@@ -2795,43 +3423,71 @@ explosion_countdown:
                     timer--;
                     if (timer == 0) {
                         timer = bs_recomp_read8(machine, base - 2197);
-                        bs_recomp_write16(machine, projectile + 58,
-                                          (uint16_t)(x + 12));
-                        bs_recomp_write16(machine, projectile + 60,
-                                          (uint16_t)(y + 12));
                         bs_recomp_write8(machine, projectile + 30,
                             bs_recomp_read8(machine, projectile + 30) |
                                 0x20);
+                        bs_recomp_write16(machine, projectile + 58,
+                                          (uint16_t)(x + 0x0c));
+                        bs_recomp_write16(machine, projectile + 60,
+                                          (uint16_t)(y + 0x0c));
                     }
                     bs_recomp_write8(machine, projectile + 27, timer);
+
+                    /* LAB_876C/LAB_877C: on the marker frames draw the
+                     * debris puff; otherwise show the plain missile frame
+                     * and flash it on alternate frames. */
                     uint8_t flash = bs_recomp_read8(machine,
                                                      projectile + 57);
-                    if (flash != 0)
-                        bs_recomp_write8(machine, projectile + 57,
-                                         (uint8_t)(flash - 1));
-
-                    bs_recomp_write32(machine, projectile,
-                        bs_recomp_read32(machine, projectile) +
-                            (uint32_t)vx);
-                    bs_recomp_write32(machine, projectile + 4,
-                        bs_recomp_read32(machine, projectile + 4) +
-                            (uint32_t)vy);
-                    x = bs_recomp_read16(machine, projectile);
-                    y = bs_recomp_read16(machine, projectile + 4);
-                    uint16_t world_left = (uint16_t)(
-                        bs_recomp_read16(machine, base + 7204) - 0x20);
-                    uint16_t world_right = (uint16_t)(world_left + 0x140);
-                    if (x <= world_left || x >= world_right || y >= 0x0200) {
-                        bs_recomp_write16(machine, projectile, 0);
-                        goto next_projectile;
+                    int draw_debris;
+                    if ((int8_t)timer >= 8 || !(timer & 1)) {
+                        if (flash == 0) {
+                            draw_debris = 1;
+                        } else {
+                            flash--;
+                            bs_recomp_write8(machine, projectile + 57,
+                                             flash);
+                            draw_debris = flash & 1;
+                        }
+                    } else {
+                        draw_debris = 0;
                     }
-                    bs_recomp_write32(machine, projectile + 36, 0x17500);
-                    uint16_t frame_stride = bs_recomp_read16(
-                        machine, projectile + 46);
-                    machine->cpu.a[2] = 0x17500 +
-                        (uint32_t)sprite * frame_stride;
-                    machine->cpu.a[3] = machine->cpu.a[2] + frame_stride -
-                        bs_recomp_read16(machine, projectile + 44);
+
+                    /* LAB_87CA/LAB_878E: advance the position and choose the
+                     * frame source. */
+                    if (draw_debris) {
+                        bs_recomp_write32(machine, projectile + 32,
+                            UINT32_C(0x0001a780) +
+                                (uint32_t)(sprite & 0x0f) * 0x300);
+                        bs_recomp_write32(machine, projectile + 36,
+                                          0x0000577e);
+                        queue_missile_debris_blit(machine, x, y);
+                        bs_recomp_write32(machine, projectile,
+                            bs_recomp_read32(machine, projectile) +
+                                (uint32_t)vx);
+                        bs_recomp_write32(machine, projectile + 4,
+                            bs_recomp_read32(machine, projectile + 4) +
+                                (uint32_t)vy);
+                        machine->cpu.a[2] = bs_recomp_read32(
+                            machine, projectile + 36);
+                        machine->cpu.a[3] = bs_recomp_read32(
+                            machine, projectile + 32);
+                    } else {
+                        bs_recomp_write32(machine, projectile,
+                            bs_recomp_read32(machine, projectile) +
+                                (uint32_t)vx);
+                        bs_recomp_write32(machine, projectile + 4,
+                            bs_recomp_read32(machine, projectile + 4) +
+                                (uint32_t)vy);
+                        bs_recomp_write32(machine, projectile + 36,
+                                          0x00017500);
+                        uint16_t frame_stride = bs_recomp_read16(
+                            machine, projectile + 46);
+                        machine->cpu.a[2] = 0x17500 +
+                            (uint32_t)sprite * frame_stride;
+                        machine->cpu.a[3] = machine->cpu.a[2] +
+                            frame_stride -
+                            bs_recomp_read16(machine, projectile + 44);
+                    }
                 } else {
                     /* LAB_8B48: armoured steering projectile.  It shares the
                      * original record ABI and direction frames with type 8,
@@ -3188,6 +3844,7 @@ static int update_inactive_player_timers(BsRecomp *machine)
                 charges != 0) {
                 bs_recomp_write8(machine,
                                  machine->cpu.a[5] - 27618, 0x32);
+                play_sound_effect(machine, 57);  /* $3F7C: nova */
                 bs_recomp_write16(machine, machine->cpu.a[4] + 66,
                                   (uint16_t)(charges - 1));
                 bs_recomp_write8(machine, machine->cpu.a[4] + 90, 0xff);
@@ -3200,6 +3857,10 @@ static int update_inactive_player_timers(BsRecomp *machine)
         set_dreg_byte(&machine->cpu.d[1], controls);
         if (bs_recomp_read8(machine, machine->cpu.a[4] + 90) != 0)
             continue;
+        /* $3FB0: a running cooldown ends the routine (LAB_3FC4 falls into the
+         * RTS at LAB_3FCE).  Letting it fall through to the LAB_3FD0 fire path
+         * decremented the auto-repeat counter twice on those frames, so the
+         * primary fired every 13 game frames instead of the original 16. */
         uint16_t cooldown =
             bs_recomp_read16(machine, machine->cpu.a[4] + 46);
         if (cooldown != 0) {
@@ -3210,6 +3871,12 @@ static int update_inactive_player_timers(BsRecomp *machine)
             if (repeat != 0)
                 bs_recomp_write8(machine, machine->cpu.a[4] + 57,
                                   (uint8_t)(repeat - 1));
+            if (!(controls & 0x10)) {
+                bs_recomp_write8(machine, machine->cpu.a[4] + 57, 0);
+                machine->cpu.sr =
+                    (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+            }
+            continue;
         }
         if (!(controls & 0x10)) {
             bs_recomp_write8(machine, machine->cpu.a[4] + 57, 0);
@@ -4117,6 +4784,42 @@ static CollisionBox player_shot_box(BsRecomp *machine, uint32_t player,
     return box;
 }
 
+/* LAB_40BE: award points.  The score is held as EIGHT ASCII DIGITS ending at
+ * -18620(A5) (player one's run to $4EA6..$4EAD), and the award arrives as a
+ * packed-BCD word.  The original splits that word into four nibbles at $40B8
+ * and then adds digit by digit from the least significant end, carrying when a
+ * column passes '9'.  The four columns above the award read $40B4..$40B7,
+ * which must be zero for the carry to propagate into them.
+ *
+ * Nothing called this, so the score sat at "00000000" all game -- the only
+ * difference left in the whole player record once the enemy shots were fixed. */
+static void award_score(BsRecomp *machine, uint16_t points)
+{
+    const uint32_t base = machine->cpu.a[5];
+    uint32_t digits = 0x40b8;
+    bs_recomp_write32(machine, 0x40b4, 0);
+    bs_recomp_write8(machine, digits + 0, (uint8_t)((points >> 4) & 0x0f));
+    bs_recomp_write8(machine, digits + 1, (uint8_t)(points & 0x0f));
+    bs_recomp_write8(machine, digits + 2, (uint8_t)((points >> 12) & 0x0f));
+    bs_recomp_write8(machine, digits + 3, (uint8_t)((points >> 8) & 0x0f));
+
+    uint32_t score = bs_recomp_read32(machine, base - 18620);
+    uint32_t addend = 0x40bc;
+    uint8_t carry = 0;
+    for (int column = 0; column < 8; column++) {
+        score--;
+        addend--;
+        uint8_t value = (uint8_t)(bs_recomp_read8(machine, score) +
+                                  bs_recomp_read8(machine, addend) + carry);
+        carry = 0;
+        if (value >= 0x3a) {
+            value = (uint8_t)(value - 10);
+            carry = 1;
+        }
+        bs_recomp_write8(machine, score, value);
+    }
+}
+
 /* LAB_3424/LAB_34FA use a negative shot-damage byte for a penetrating shot.
  * It survives the overlap and contributes two points of damage; ordinary
  * shots are consumed and contribute their unsigned damage byte. */
@@ -4164,6 +4867,31 @@ static void collide_player_shots_with_entities(BsRecomp *machine)
                     if (!(bs_recomp_read8(machine, entity + 31) & 0x04) &&
                         collision_boxes_overlap(shot_box, entity_box)) {
                         apply_player_shot_hit(machine, shot, entity + 24);
+                        /* $34A8-$34D6: the accumulated damage decides which
+                         * sound the hit makes.  The 8-bit SUB/BPL means a
+                         * record whose health has gone negative is destroyed
+                         * and takes the fixed sound 29; a survivor plays its
+                         * own hit sound from +46.  (LAB_40BE's score award is
+                         * still outstanding.) */
+                        int8_t remaining = (int8_t)(uint8_t)(
+                            bs_recomp_read8(machine, entity + 28) -
+                            bs_recomp_read8(machine, entity + 24));
+                        uint16_t points;
+                        if (remaining < 0) {
+                            /* $34B2: a kill pays the record's own value. */
+                            points = bs_recomp_read16(machine, entity + 44);
+                            play_sound_effect(machine, 29);
+                            if (bs_recomp_read8(machine, entity + 17) == 0x20)
+                                bs_recomp_write8(machine,
+                                    machine->cpu.a[5] - 27618, 0x0c);
+                        } else {
+                            /* $34CE: a survivor pays the standard hit value. */
+                            points = bs_recomp_read16(machine,
+                                machine->cpu.a[5] - 19422);
+                            play_sound_effect(machine,
+                                bs_recomp_read8(machine, entity + 46));
+                        }
+                        award_score(machine, points);   /* $34DC */
                         break;
                     }
                 }
@@ -4215,6 +4943,39 @@ static void collide_player_shots_with_projectiles(BsRecomp *machine)
                         collision_boxes_overlap(shot_box, projectile_box)) {
                         apply_player_shot_hit(machine, shot,
                                               projectile + 62);
+                        /* $3584-$35AC.  A survivor plays its own hit sound
+                         * from +25.  A kill goes through LAB_35CE, which
+                         * picks 28, or 29 for a type-2 record, or 20 once
+                         * $2E02F has reached 7 -- except while the firing
+                         * ship is in nova state 9 on any frame but 5, when
+                         * the original falls back to the survivor sound. */
+                        int8_t remaining = (int8_t)(uint8_t)(
+                            bs_recomp_read8(machine, projectile + 24) -
+                            bs_recomp_read8(machine, projectile + 62));
+                        int destroyed = remaining < 0 &&
+                            (bs_recomp_read8(machine, player + 31) != 0x09 ||
+                             bs_recomp_read8(machine, player + 63) == 0x05);
+                        uint16_t points;
+                        if (destroyed) {
+                            /* LAB_35CE pays 54(A1) and picks its sound. */
+                            points = bs_recomp_read16(machine,
+                                                       projectile + 54);
+                            uint8_t sound = 28;
+                            if (bs_recomp_read8(machine,
+                                                projectile + 31) == 2) {
+                                sound = 29;
+                                if (bs_recomp_read8(machine, 0x2e02f) >= 7)
+                                    sound = 20;
+                            }
+                            play_sound_effect(machine, sound);
+                        } else {
+                            /* $35A4: the standard hit value. */
+                            points = bs_recomp_read16(machine,
+                                machine->cpu.a[5] - 19208);
+                            play_sound_effect(machine,
+                                bs_recomp_read8(machine, projectile + 25));
+                        }
+                        award_score(machine, points);   /* $35B2 */
                         break;
                     }
                 }
@@ -4456,12 +5217,337 @@ static void update_demo_scoreboard(BsRecomp *machine)
     draw_four_text_pairs(machine);
 }
 
+/* LAB_43F2/$43FA: draw a ship's four initials into the game-over display at
+ * $B394 (player one) or $B3D8 (player two).  The font at $10550 is ten bytes
+ * per glyph; each row is written to the second plane at +4/+5 while a
+ * one-pixel down-shift of the previous row, masked by the inverse of this one,
+ * goes to the first plane at +0/+1 -- that is the drop-shadow outline.  Two
+ * characters are composited per pass, and the second pass starts $C bytes
+ * further along the 112-byte rows. */
+static void draw_initials_pair(BsRecomp *machine, uint32_t display,
+                               uint32_t source)
+{
+    uint32_t left = UINT32_C(0x10550) +
+                    (uint32_t)bs_recomp_read8(machine, source) * 10;
+    uint32_t right = UINT32_C(0x10550) +
+                     (uint32_t)bs_recomp_read8(machine, source + 1) * 10;
+    for (int row = 0; row <= 8; row++) {
+        uint8_t above = bs_recomp_read8(machine, left - 1);
+        uint8_t here = bs_recomp_read8(machine, left);
+        left++;
+        bs_recomp_write8(machine, display + 4, here);
+        bs_recomp_write8(machine, display,
+                         (uint8_t)((above >> 1) & (uint8_t)~here));
+        uint8_t above2 = bs_recomp_read8(machine, right - 1);
+        uint8_t here2 = bs_recomp_read8(machine, right);
+        right++;
+        bs_recomp_write8(machine, display + 5, here2);
+        bs_recomp_write8(machine, display + 1,
+                         (uint8_t)((above2 >> 1) & (uint8_t)~here2));
+        display += 0x70;
+    }
+}
+
+static void draw_initials(BsRecomp *machine, uint32_t display, uint32_t source)
+{
+    draw_initials_pair(machine, display, source);
+    /* $43F6: nine rows of $70 is $3F0, so backing up $3E4 lands $C along. */
+    draw_initials_pair(machine, display + 0x3f0 - 0x3e4, source + 2);
+}
+
+/* LAB_4232: the game-over initials entry, one ship at a time.  44(A4) holds
+ * the joystick bits (0 up, 1 right, 2 down, 3 left, 4 fire) with 40(A4) as the
+ * auto-repeat delay; 42(A4) is the cursor column 0..3 and 34(A4) the four
+ * characters, clamped to '0'..'Z'.  120(A4) is a timeout, so the screen ends
+ * itself even with no input -- which is how an unattended game finishes.
+ *
+ * $42F8 is the completion: it marks the ship done at 91(A4), then either flags
+ * it $FF or parks it at $3E7 and arms the $FA hold at -16122(A5) that
+ * LAB_410A counts down before changing screen. */
+static void update_name_entry(BsRecomp *machine, uint32_t player,
+                              uint32_t display)
+{
+    const uint32_t base = machine->cpu.a[5];
+    uint8_t controls = bs_recomp_read8(machine, player + 44);
+    if (controls != 0) {
+        uint8_t repeat = bs_recomp_read8(machine, player + 40);
+        if (repeat != 0) {
+            repeat--;
+            bs_recomp_write8(machine, player + 40, repeat);
+            if (repeat == 0) bs_recomp_write8(machine, player + 40, 0x03);
+            else bs_recomp_write8(machine, player + 44, 0);
+        } else {
+            bs_recomp_write8(machine, player + 40, 0x19);
+        }
+    } else {
+        bs_recomp_write8(machine, player + 40, 0);
+    }
+
+    if (bs_recomp_read8(machine, player + 91) != 0) {
+        /* $436C: already finished -- wait for fire to be released. */
+        if ((bs_recomp_read8(machine, player + 44) & 0x10) &&
+            bs_recomp_read8(machine, player + 45) == 0) {
+            /* $437A: reset the ship for another game.  $127E is two writes
+             * followed by the body already translated as
+             * initialise_player_object ($3722 plus $128C onwards). */
+            bs_recomp_write16(machine, player + 58,
+                              bs_recomp_read16(machine, base + 10060));
+            bs_recomp_write16(machine, player + 60, 0);
+            machine->cpu.a[4] = player;
+            initialise_player_object(machine);
+        }
+        return;
+    }
+
+    uint16_t timeout = (uint16_t)(bs_recomp_read16(machine, player + 120) - 1);
+    bs_recomp_write16(machine, player + 120, timeout);
+    int finish = timeout == 0;
+
+    if (!finish) {
+        controls = bs_recomp_read8(machine, player + 44);
+        uint16_t column = bs_recomp_read16(machine, player + 42);
+        uint32_t letter = player + 34 + column;
+        if ((controls & 0x02) && column != 3)
+            bs_recomp_write16(machine, player + 42, (uint16_t)(column + 1));
+        if ((controls & 0x08) && bs_recomp_read16(machine, player + 42) != 0)
+            bs_recomp_write16(machine, player + 42,
+                (uint16_t)(bs_recomp_read16(machine, player + 42) - 1));
+        if ((controls & 0x01) && bs_recomp_read8(machine, letter) != 0x5a)
+            bs_recomp_write8(machine, letter,
+                (uint8_t)(bs_recomp_read8(machine, letter) + 1));
+        if ((controls & 0x04) && bs_recomp_read8(machine, letter) != 0x30)
+            bs_recomp_write8(machine, letter,
+                (uint8_t)(bs_recomp_read8(machine, letter) - 1));
+        bs_recomp_write8(machine, player + 37, 0x20);
+        if (bs_recomp_read16(machine, player + 42) == 3)
+            bs_recomp_write8(machine, player + 37, 0x5d);
+        if (controls & 0x10) {
+            if (bs_recomp_read16(machine, player + 42) == 3) finish = 1;
+            else bs_recomp_write16(machine, player + 42,
+                (uint16_t)(bs_recomp_read16(machine, player + 42) + 1));
+        }
+    }
+    draw_initials(machine, display, player + 34);
+
+    if (!finish) return;
+    /* $42F8 */
+    bs_recomp_write8(machine, player + 37, 0x20);
+    bs_recomp_write8(machine, player + 91, 0xff);
+    if (bs_recomp_read8(machine, player + 45) != 0) {
+        bs_recomp_write8(machine, player + 38, 0xff);
+        return;
+    }
+    bs_recomp_write16(machine, player + 68, 0x03e7);
+    bs_recomp_write16(machine, player + 70, 0x03e7);
+    bs_recomp_write16(machine, player + 72, 0);
+    bs_recomp_write32(machine, player + 76, UINT32_C(0x00010f10));
+    bs_recomp_write16(machine, base - 16122, 0x00fa);
+}
+
+static void update_selected_player_score(BsRecomp *machine);
+static void update_demo_scoreboard(BsRecomp *machine);
+static void update_sprite_bitplane_pointers(BsRecomp *machine);
+
+/* LAB_A30E at $C1C: the message/overlay driver.  8514(A5) is the frame
+ * counter for a screen message -- zero means none is running.  2146(A5) points
+ * at the glyph rows, 2144(A5) is the row count and 214A(A5) the duration.
+ * $A4F6 advances the counter every frame and $A4FA clears it once the counter
+ * has passed $D1 plus that duration, which is what releases the wait loops in
+ * LAB_7002 and completes a screen change.
+ *
+ * The sprite-list and Copper building between $A316 and $A4EE is presentation
+ * only: it composes the message glyphs into the hardware sprites at $5E000 and
+ * the Copper list at $BB46.  That is still outstanding, so the screens run for
+ * the right number of frames but do not yet show their text. */
+static void update_message_overlay(BsRecomp *machine)
+{
+    const uint32_t base = machine->cpu.a[5];
+    uint16_t counter = bs_recomp_read16(machine, base + 8514);
+    if (counter == 0) {
+        machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+        return;
+    }
+    bs_recomp_write16(machine, base + 8514, (uint16_t)(counter + 1));
+    uint16_t elapsed = (uint16_t)(bs_recomp_read16(machine, base + 8514) -
+                                  0x00d1);
+    if ((int16_t)elapsed >= (int16_t)bs_recomp_read16(machine, base + 8522))
+        bs_recomp_write16(machine, base + 8514, 0);
+    machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+}
+
+/* LAB_7002 at $D0A: the stage-clear sequence.  It only runs once the type-$27
+ * end-of-stage gate has toggled -4100(A5), which needs a live ship to sit in
+ * its 32-pixel box for ten straight frames.
+ *
+ * The two `cmpi.b #$f0,$6(a6)` spins are raster waits, i.e. host scheduling
+ * seams; what matters is that each iteration runs the same per-frame work the
+ * main loop would and repeats until the message driver clears 8514.  $7180 is
+ * the payoff: the pending stage in 7230(A5) becomes the current one in 7228
+ * and the stage descriptor is reloaded from $14EA + stage * $8C. */
+static int run_stage_clear(BsRecomp *machine)
+{
+    const uint32_t base = machine->cpu.a[5];
+    if (bs_recomp_read8(machine, base - 4100) == 0) {
+        machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+        return BS_RECOMP_OK;
+    }
+
+    bs_recomp_write8(machine, base - 12695, 0xff);
+    bs_recomp_write8(machine, base - 12429, 0xff);
+    for (uint32_t offset = 0; offset <= 0x0fff; offset++)
+        bs_recomp_write32(machine, 0x5e000 + offset * 4, 0);
+    bs_recomp_write16(machine, base - 28552, 0);
+    bs_recomp_write16(machine, base + 8514, 1);
+
+    /* $7050-$70A8: pick the message for this stage, then $70AE waits it out. */
+    if (bs_recomp_read16(machine, base + 7228) != 0) {
+        uint8_t weapons = bs_recomp_read8(machine, base - 4099);
+        int bits = 0;
+        for (int i = 0; i < 4; i++, weapons >>= 1)
+            if (!(weapons & 1)) bits++;
+        if (bits == 2) {
+            bs_recomp_write32(machine, base + 8518, 0xa064);
+            bs_recomp_write16(machine, base + 8516, 0x000b);
+            bs_recomp_write16(machine, base + 8522, 0x0190);
+        } else {
+            bs_recomp_write32(machine, base + 8518, 0x9fc2);
+            bs_recomp_write16(machine, base + 8516, 0x0008);
+            bs_recomp_write16(machine, base + 8522, 0x0140);
+        }
+    } else {
+        bs_recomp_write32(machine, base + 8518, 0x9f34);
+        bs_recomp_write16(machine, base + 8516, 0x0007);
+        bs_recomp_write16(machine, base + 8522, 0x0118);
+    }
+    for (int guard = 0; guard < 4096; guard++) {
+        if (bs_recomp_read16(machine, base + 8514) == 0) break;
+        update_message_overlay(machine);
+        update_sprite_bitplane_pointers(machine);
+        bs_recomp_write16(machine, base - 28552,
+            (uint16_t)(bs_recomp_read16(machine, base - 28552) + 2));
+    }
+
+    /* $70C8-$7144: the bonus screen, then the second wait. */
+    bs_recomp_write16(machine, base - 28552, 0);
+    bs_recomp_write16(machine, base + 8514, 1);
+    bs_recomp_write32(machine, base + 8518, 0x9ea6);
+    bs_recomp_write16(machine, base + 8516, 0x0007);
+    bs_recomp_write16(machine, base + 8522, 0x0172);
+    bs_recomp_write16(machine, base + 7916, 0x3030);
+    bs_recomp_write16(machine, base + 7976, 0x3030);
+    for (uint32_t offset = 0; offset <= 0x0fff; offset++)
+        bs_recomp_write32(machine, 0x5e000 + offset * 4, 0);
+    for (int guard = 0; guard < 4096; guard++) {
+        if (bs_recomp_read16(machine, base + 8514) == 0) break;
+        update_message_overlay(machine);
+        update_demo_scoreboard(machine);
+        update_sprite_bitplane_pointers(machine);
+        update_selected_player_score(machine);
+        bs_recomp_write16(machine, base - 28552,
+            (uint16_t)(bs_recomp_read16(machine, base - 28552) + 1));
+    }
+    bs_recomp_write16(machine, 0xdff096, 0x0020);
+
+    /* $7180: the stage actually changes here. */
+    bs_recomp_write16(machine, base + 7232,
+                      bs_recomp_read16(machine, base + 7228));
+    uint16_t stage = bs_recomp_read16(machine, base + 7230);
+    bs_recomp_write16(machine, base + 7228, stage);
+    uint32_t descriptor = UINT32_C(0x14ea) + (uint32_t)stage * 0x8c;
+    bs_recomp_write32(machine, base + 7224, descriptor);
+
+    /* $71A2-$71BC: stage zero reloads the base scenery banks as well. */
+    if (stage == 0) {
+        if (load_module(machine, 0x19f8) != BS_RECOMP_OK)
+            return BS_RECOMP_ERROR;
+        if (load_module(machine, 0x1a10) != BS_RECOMP_OK)
+            return BS_RECOMP_ERROR;
+    }
+    uint32_t module = bs_recomp_read32(machine, descriptor + 8);
+    if (load_module(machine, module) != BS_RECOMP_OK)
+        return BS_RECOMP_ERROR;
+
+    bs_recomp_write8(machine, base - 4100, 0);
+    bs_recomp_write16(machine, 0xdff096, 0x8020);
+    machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) | 0x04);
+    return BS_RECOMP_OK;
+}
+
+/* LAB_410A at $C60.  This used to be a stub that only modelled the demo, so
+ * the level-end transition at $416A-$41DA never ran and the recompilation
+ * played level one forever -- 120,000 game frames of it, without ever changing
+ * mode.  The guards decide whether BOTH ships have finished the level (or are
+ * out of play); only then does the game tear down the audio system, pull in
+ * the next module and hand over to the gameplay overlay.
+ *
+ * -12702/-12701/-12672 are player one's +38 marker, +39 and +68; -12436/
+ * -12435/-12406 are player two's.  A ship that is in play, not yet marked
+ * $FF, and whose +68 is not $3E6 has not finished, so the transition is
+ * skipped for this frame. */
+static int player_still_in_play(BsRecomp *machine, uint32_t player)
+{
+    if (bs_recomp_read8(machine, player + 39) == 0) return 0;
+    if (bs_recomp_read8(machine, player + 38) == 0xff) return 0;
+    return bs_recomp_read16(machine, player + 68) != 0x03e6;
+}
+
 static void update_inactive_credit_state(BsRecomp *machine)
 {
-    bs_recomp_write8(machine, machine->cpu.a[5] - 16120, 0);
-    /* Both demo ships are present and carry a marker below $C8.  The routine
-     * therefore skips credit/game-over handling and finishes on player two's
-     * marker comparison. */
+    const uint32_t base = machine->cpu.a[5];
+    bs_recomp_write8(machine, base - 16120, 0);
+
+    int blocked = player_still_in_play(machine, 0x4e3c) ||
+                  player_still_in_play(machine, 0x4f46);
+    if (!blocked) {
+        uint16_t hold = bs_recomp_read16(machine, base - 16122);
+        if (hold != 0) {
+            /* $415E: a settling delay before the screen may change. */
+            bs_recomp_write16(machine, base - 16122, (uint16_t)(hold - 1));
+            blocked = 1;
+        }
+    }
+    if (!blocked &&
+        bs_recomp_read16(machine, base + 8514) == 0 &&
+        bs_recomp_read16(machine, base - 28550) == 0 &&
+        bs_recomp_read16(machine, base + 8524) == 0) {
+        /* $417C-$41DA: the level is over.  Stage the next screen, silence and
+         * shut down the audio system, drop sprite DMA while the sprite arena
+         * is cleared and the next module is pulled in, then bring the audio
+         * system back up.  The original also pokes an RTS over the $2470E
+         * sound-effect entry so nothing chirps during the changeover. */
+        bs_recomp_write16(machine, base + 8524, 0xffff);
+        bs_recomp_write16(machine, base + 8514, 0x0001);
+        bs_recomp_write32(machine, base + 8518, UINT32_C(0x0000fce6));
+        bs_recomp_write16(machine, base + 8516, 0x000e);
+        bs_recomp_write16(machine, base + 8522, 0x40d8);
+        gameplay_audio_shutdown(machine);
+        bs_recomp_write16(machine, 0xdff096, 0x0020);
+        if (load_module(machine, 0x1ab8) != BS_RECOMP_OK) return;
+        for (uint32_t offset = 0; offset <= 0x0fff; offset++)
+            bs_recomp_write32(machine, 0x5e000 + offset * 4, 0);
+        bs_recomp_write16(machine, 0xdff096, 0x8020);
+        bs_recomp_write8(machine, base - 26245, 0x02);
+        (void)gameplay_audio_init(machine);
+        bs_recomp_write16(machine, 0x2470e, 0x4e75);
+        bs_recomp_write8(machine, 0x251f8 + 5,
+            (uint8_t)(bs_recomp_read8(machine, 0x251f8 + 5) ^ 1));
+    }
+
+    /* $41E0/$420A: a ship carrying the $C8 game-over marker runs the initials
+     * entry.  This is what eventually ends the game: on completion $42F8 sets
+     * +68/+70 to $3E7 and arms the $FA settling hold above, and the level-end
+     * transition then fires on the following frame. */
+    if (bs_recomp_read8(machine, 0x4e3c + 38) == 0xc8) {
+        if (bs_recomp_read8(machine, 0x4e3c + 100) != 0)
+            bs_recomp_write32(machine, 0x4e3c + 34, UINT32_C(0x20202020));
+        update_name_entry(machine, 0x4e3c, 0xb394);
+    }
+    if (bs_recomp_read8(machine, 0x4f46 + 38) == 0xc8) {
+        if (bs_recomp_read8(machine, 0x4f46 + 100) != 0)
+            bs_recomp_write32(machine, 0x4f46 + 34, UINT32_C(0x20202020));
+        update_name_entry(machine, 0x4f46, 0xb3d8);
+    }
+
     uint8_t marker = bs_recomp_read8(machine, 0x4f46 + 38);
     machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) |
                       (marker == 0xc8 ? 0x04 :
@@ -4505,6 +5591,15 @@ static void update_frame_palette_accents(BsRecomp *machine)
     machine->cpu.sr &= 0xfff0;
 }
 
+/* DIVU followed by ANDI.L #$FFFF.  On a 68000 an overflowing DIVU leaves the
+ * destination untouched, so the mask then keeps the low word of the DIVIDEND,
+ * not a clamped quotient.  A near-zero denominator makes that reachable. */
+static uint32_t divu_word(uint32_t dividend, uint16_t divisor)
+{
+    uint32_t quotient = dividend / divisor;
+    return (quotient > 0xffff ? dividend : quotient) & 0xffff;
+}
+
 static void spawn_stationary_effect(BsRecomp *machine, uint16_t x,
                                     uint16_t y)
 {
@@ -4534,15 +5629,96 @@ static void spawn_stationary_effect(BsRecomp *machine, uint16_t x,
                 (size_t)(15 - insertion) * 20);
     }
     uint32_t effect = 0x4976 + insertion * 20;
-    memset(machine->memory + effect, 0, 20);
+    /* Deliberately NOT cleared.  $48D4 and $48F0 both write only the WORDS at
+     * +0 and +4, leaving the low halves of the 16.16 x and y inherited from
+     * whatever the insertion shift moved into this slot.  Zeroing them cost a
+     * pixel of position against the reference. */
     bs_recomp_write16(machine, effect, x);
     bs_recomp_write16(machine, effect + 4, y);
-    bs_recomp_write32(machine, effect + 8, 0);
-    bs_recomp_write32(machine, effect + 12, 0);
-    bs_recomp_write32(machine, effect + 16,
-        bs_recomp_read8(machine, 0x79de)
-            ? UINT32_C(0x0c700018)
-            : UINT32_C(0x0c600001));
+
+    /* $4836 chooses between TWO completely different effects, and only the
+     * second was translated.  -14384(A5) set means stationary debris; clear
+     * means an AIMED ENEMY SHOT, which is what most of these records are.
+     * Spawning every one as debris gave each enemy bullet the debris sprite
+     * ($C6B6 entry $60 instead of $58), the debris height (12 lines instead of
+     * 7) and a non-zero +19 timer, and a non-zero timer sends the updater down
+     * its home-in-on-the-player branch -- so the shots drifted towards the
+     * ship as tall figures instead of flying out as small round dots. */
+    if (bs_recomp_read8(machine, base - 14384) != 0) {
+        /* LAB_48F0: stationary debris, no velocity. */
+        bs_recomp_write32(machine, effect + 8, 0);
+        bs_recomp_write32(machine, effect + 12, 0);
+        bs_recomp_write32(machine, effect + 16,
+            bs_recomp_read8(machine, 0x79de)
+                ? UINT32_C(0x0c700018)
+                : UINT32_C(0x0c600001));
+        return;
+    }
+
+    /* $483E-$48EE: build the shot's velocity, then stamp the aimed
+     * descriptor -- height 7, graphics $58, timer 0. */
+    uint8_t signs = 0;
+    uint16_t speed = bs_recomp_read16(machine, base - 14386);
+    uint32_t dominant = (uint32_t)speed << 8;
+    uint16_t d1, d2;
+    uint16_t override_x = bs_recomp_read16(machine, base - 14390);
+    if (override_x != 0) {
+        /* An explicit direction was staged by the firing routine. */
+        d1 = override_x;
+        if ((int16_t)d1 < 0) { d1 = (uint16_t)(-(int16_t)d1); signs |= 1; }
+        bs_recomp_write16(machine, base - 14390, 0);
+        d2 = bs_recomp_read16(machine, base - 14388);
+        if ((int16_t)d2 < 0) { d2 = (uint16_t)(-(int16_t)d2); signs |= 2; }
+    } else {
+        /* LAB_491C: aim at whichever player the original picks. */
+        uint16_t one_distance, two_distance, parts[4];
+        signs = homing_directions(machine,
+                                  bs_recomp_read16(machine, base - 14398),
+                                  bs_recomp_read16(machine, base - 14396),
+                                  &one_distance, &two_distance, parts);
+        d1 = parts[0];
+        d2 = parts[1];
+        uint8_t mode = bs_recomp_read8(machine, machine->cpu.a[0] + 42);
+        int use_two = 0;
+        if (mode == 1) {
+            use_two = 0;
+        } else if (mode == 2) {
+            use_two = 1;
+        } else if ((int8_t)bs_recomp_read8(machine, base - 12702) < 0) {
+            use_two = 1;
+        } else if ((int8_t)bs_recomp_read8(machine, base - 12436) < 0) {
+            use_two = 0;
+        } else {
+            /* CMP.W D6,D5; BLT keeps player one when it is the nearer. */
+            use_two = !((int16_t)one_distance < (int16_t)two_distance);
+        }
+        if (use_two) {
+            d1 = parts[2];
+            d2 = parts[3];
+            signs = (uint8_t)(signs >> 2);
+        }
+    }
+
+    /* $4896: the dominant axis runs at the full speed and the other is scaled
+     * by the ratio, both as 16.16 fixed point. */
+    uint32_t vx, vy;
+    if ((int16_t)d2 < (int16_t)d1) {
+        vy = divu_word((uint32_t)d2 * speed, (uint16_t)(d1 | 1)) << 8;
+        vx = dominant;
+    } else {
+        vx = divu_word((uint32_t)d1 * speed, (uint16_t)(d2 | 1)) << 8;
+        vy = dominant;
+    }
+    if (signs & 1) vx = (uint32_t)(-(int32_t)vx);
+    if (signs & 2) vy = (uint32_t)(-(int32_t)vy);
+
+    bs_recomp_write16(machine, effect,
+                      bs_recomp_read16(machine, base - 14398));
+    bs_recomp_write16(machine, effect + 4,
+                      bs_recomp_read16(machine, base - 14396));
+    bs_recomp_write32(machine, effect + 8, vx);
+    bs_recomp_write32(machine, effect + 12, vy);
+    bs_recomp_write32(machine, effect + 16, UINT32_C(0x07580000));
 }
 
 static int scan_pending_impact_flags(BsRecomp *machine)
@@ -4563,9 +5739,16 @@ static int scan_pending_impact_flags(BsRecomp *machine)
                 uint16_t y = bs_recomp_read16(machine, record + 60);
                 bs_recomp_write16(machine, machine->cpu.a[5] - 14398, x);
                 bs_recomp_write16(machine, machine->cpu.a[5] - 14396, y);
-                bs_recomp_write8(machine, machine->cpu.a[5] - 14384,
-                                 bs_recomp_read8(machine, record + 31) == 9
-                                     ? 0xff : 0);
+                /* $473C-$475C: the large-debris flag and its sound are only
+                 * raised for a type-9 record whose impact sits exactly $26
+                 * below the record's own y. */
+                bs_recomp_write8(machine, machine->cpu.a[5] - 14384, 0);
+                if (bs_recomp_read8(machine, record + 31) == 9 &&
+                    (uint16_t)(y - bs_recomp_read16(machine, record + 4)) ==
+                        0x0026) {
+                    bs_recomp_write8(machine, machine->cpu.a[5] - 14384, 0xff);
+                    play_sound_effect(machine, 56);
+                }
                 spawn_stationary_effect(machine, x, y);
             }
         }
@@ -4589,7 +5772,10 @@ static int scan_pending_impact_flags(BsRecomp *machine)
                                                machine->cpu.a[0] + 40);
                 bs_recomp_write16(machine, machine->cpu.a[5] - 14398, x);
                 bs_recomp_write16(machine, machine->cpu.a[5] - 14396, y);
+                /* $4790-$47AA: the $25/$26 entities take the same large-debris
+                 * flag and impact sound. */
                 bs_recomp_write8(machine, machine->cpu.a[5] - 14384, 0xff);
+                play_sound_effect(machine, 56);
                 spawn_stationary_effect(machine, x, y);
             } else {
                 snprintf(machine->error, sizeof machine->error,
@@ -4711,7 +5897,8 @@ static int update_scheduled_projectiles(BsRecomp *machine)
             (uint16_t)machine->cpu.d[3] * UINT32_C(0x20);
         machine->cpu.a[2] = 0xcd7a + (uint16_t)machine->cpu.d[3];
         uint16_t x = (uint16_t)machine->cpu.d[1];
-        if (x >= 0x0320)
+        /* LAB_7628: CMPI.W #$0320,D1 + BLT is a SIGNED comparison. */
+        if ((int16_t)x >= 0x0320)
             x = (uint16_t)(x - 0x03e8 + 0x0100);
         else
             x = (uint16_t)(x + bs_recomp_read16(machine, base + 7204));
@@ -5145,19 +6332,34 @@ static int allocate_wave_object(BsRecomp *machine, uint32_t template,
 static void spawn_wave_objects(BsRecomp *machine)
 {
     const uint32_t base = machine->cpu.a[5];
+    const int trace = getenv("BS_TRACE_WAVE") != NULL;
     uint16_t value = bs_recomp_read16(machine, base + 7222);
     if (value == 0) {
+        if (trace) fprintf(stderr, "wave: gate 7222==0\n");
         machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xffe0) | 0x04);
         return;
     }
     value = bs_recomp_read16(machine, base + 7212);
     if (value != 0) {
+        if (trace) fprintf(stderr, "wave: gate 7212=%04x\n", value);
         machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xffe0) |
                                      ((value & 0x8000) ? 0x08 : 0));
         return;
     }
-    if ((int16_t)bs_recomp_read16(machine, base + 8514) >= 0x7530)
+    if ((int16_t)bs_recomp_read16(machine, base + 8514) >= 0x7530) {
+        if (trace) fprintf(stderr, "wave: gate 8514\n");
         return;
+    }
+    if (trace) {
+        uint32_t cursor = bs_recomp_read32(machine, base + 7214) - 0x30;
+        fprintf(stderr, "wave: scan mode=%u progress=%04x cursor=%06x words:",
+                bs_recomp_read16(machine, base + 7228),
+                bs_recomp_read16(machine, base + 7206), cursor);
+        for (int w = 0; w < 24; w++)
+            fprintf(stderr, " %04x",
+                    bs_recomp_read16(machine, cursor + (uint32_t)w * 2));
+        fprintf(stderr, "\n");
+    }
 
     if (bs_recomp_read16(machine, base + 7228) == 0 &&
         bs_recomp_read16(machine, base + 7230) == 0) {
@@ -6183,15 +7385,13 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
             update_sprite_bitplane_pointers(machine);
             machine->cpu.pc = 0xc1c;
             break;
-        case 0xc1c: {
-            uint16_t active = bs_recomp_read16(machine,
-                                                machine->cpu.a[5] + 8514);
-            machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xfff0) |
-                              (active == 0 ? 0x04 :
-                               ((active & 0x8000) ? 0x08 : 0)));
+        case 0xc1c:
+            /* JSR LAB_A30E: run the message overlay, which advances and
+             * eventually clears 8514 -- the counter every screen change
+             * waits on. */
+            update_message_overlay(machine);
             machine->cpu.pc = 0xc22;
             break;
-        }
         case 0xc22:
             if (bs_recomp_read8(machine, machine->cpu.a[5] - 28551) & 2) {
                 bs_recomp_write32(machine, machine->cpu.a[5] - 18624,
@@ -6353,8 +7553,15 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
         case 0xd00:
             update_sprite_bitplane_pointers(machine);
             /* The reference's CIA music tick lands on this raster boundary.
-             * Preserve its architectural result without executing guest
-             * interrupt code in the native dispatcher. */
+             * The dispatcher does not execute guest interrupt code, so the
+             * sequencer is driven natively here instead; $24F34's own
+             * architectural result (D1/SR below) is preserved either way.
+             * The CIA-B timer runs at roughly twice the 25 Hz game loop, so
+             * the handler gets two ticks per cycle. */
+            if (machine->music_enabled) {
+                music_interrupt(machine);
+                music_interrupt(machine);
+            }
             machine->cpu.d[1] = 0x00050000;
             machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xffe0) | 0x15);
             machine->cpu.pc = 0xd04;
@@ -6370,12 +7577,11 @@ int bs_recomp_run(BsRecomp *machine, long max_steps)
             break;
         }
         case 0xd0a: {
-            uint8_t active = bs_recomp_read8(machine,
-                                              machine->cpu.a[5] - 4100);
+            /* BSR LAB_7002: the stage-clear sequence, gated on -4100(A5). */
+            int cleared = run_stage_clear(machine);
+            if (cleared != BS_RECOMP_OK) return cleared;
             machine->cpu.sr = (uint16_t)((machine->cpu.sr & 0xffe0) |
-                              (machine->cpu.sr & 0x10) |
-                              (active == 0 ? 0x04 :
-                               ((active & 0x80) ? 0x08 : 0)));
+                                          (machine->cpu.sr & 0x10) | 0x04);
             machine->cpu.pc = 0xd0e;
             break;
         }

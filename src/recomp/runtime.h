@@ -38,6 +38,9 @@ typedef struct {
     int external_playfield_restore;
     BsCustomWriteHook custom_write_hook;
     void *custom_write_user;
+    /* The music sequencer is off until a caller asks for it, so the
+     * step-exact oracle tests keep their existing register traces. */
+    int music_enabled;
     BsAudioSampleHook audio_sample_hook;
     void *audio_sample_user;
     char data_directory[512];
@@ -58,6 +61,11 @@ void bs_recomp_set_external_playfield_restore(BsRecomp *machine, int enabled);
 int bs_recomp_start_new_game(BsRecomp *machine);
 void bs_recomp_set_custom_write_hook(BsRecomp *machine,
                                      BsCustomWriteHook hook, void *user);
+void bs_recomp_set_music_enabled(BsRecomp *machine, int enabled);
+/* One CIA-B tick of the $24F34 sequencer.  It is interrupt driven on the
+ * real machine, so a host must keep ticking it on frames where it is not
+ * running the game loop -- the title screen otherwise sits silent. */
+void bs_recomp_music_tick(BsRecomp *machine);
 void bs_recomp_set_audio_sample_hook(BsRecomp *machine,
                                      BsAudioSampleHook hook, void *user);
 

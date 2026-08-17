@@ -293,6 +293,451 @@ static int live_input_test(void)
     return passed;
 }
 
+/* $3FB0: with fire held the primary repeats every sixteenth game frame.  A
+ * running cooldown at +46 must end LAB_3F54 outright; falling through to the
+ * LAB_3FD0 fire path decremented the +57 auto-repeat counter twice on those
+ * frames and the ship fired every thirteenth frame instead. */
+static int primary_fire_cadence_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+
+    long volleys[6];
+    unsigned found = 0;
+    int previously_live = 0;
+    for (long frame = 0; frame < 400 && found < 6; frame++) {
+        bs_recomp_set_input(fixture, 0, BS_INPUT_FIRE);
+        int reached = 0;
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; g < 512 && !reached; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xbce) reached = 1;
+        }
+        if (!reached) goto done;
+        /* The shot slot the primary always loads first. */
+        int live = bs_recomp_read16(fixture, 0x4e3c + 122 + 2 * 12) != 0;
+        if (live && !previously_live) volleys[found++] = frame;
+        previously_live = live;
+    }
+    passed = found == 6;
+    for (unsigned i = 1; passed && i < found; i++)
+        passed = volleys[i] - volleys[i - 1] == 16;
+    if (!passed)
+        fprintf(stderr, "fire cadence: %u volleys, gaps", found);
+    for (unsigned i = 1; !passed && i < found; i++)
+        fprintf(stderr, " %ld", volleys[i] - volleys[i - 1]);
+    if (!passed) fprintf(stderr, "\n");
+done:
+    free(fixture);
+    return passed;
+}
+
+static unsigned gameplay_sfx_events;
+static int gameplay_sfx_bad;
+
+static void count_gameplay_sample(void *user, const BsAudioSampleEvent *event)
+{
+    (void)user;
+    gameplay_sfx_events++;
+    /* $2539C descriptors: a real sample in the bank, an audible 1..64 volume
+     * and a plausible Paula period.  Reading the volume as a byte at +8 -- it
+     * is a word -- handed the platform a silent zero. */
+    if (event->address < 0x20000 || event->address >= BS_RECOMP_MEMORY_SIZE ||
+        event->length_words == 0 || event->volume == 0 ||
+        event->volume > 64 || event->period == 0)
+        gameplay_sfx_bad = 1;
+}
+
+/* Shooting things has to make a noise: the $2470E sound sites in the collision
+ * passes, the impact/debris pass and the nova must reach the platform hook. */
+static int gameplay_sfx_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0;
+    gameplay_sfx_events = 0;
+    gameplay_sfx_bad = 0;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+    bs_recomp_set_audio_sample_hook(fixture, count_gameplay_sample, NULL);
+    for (long frame = 0; frame < 600; frame++) {
+        bs_recomp_set_input(fixture, 0, BS_INPUT_FIRE);
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xbce) break;
+        }
+    }
+    passed = gameplay_sfx_events >= 10 && !gameplay_sfx_bad;
+    if (!passed)
+        fprintf(stderr, "gameplay sfx: %u events, malformed=%d\n",
+                gameplay_sfx_events, gameplay_sfx_bad);
+done:
+    free(fixture);
+    return passed;
+}
+
+/* $4836 picks between an aimed enemy shot and stationary debris on the
+ * -14384(A5) flag.  Only the debris exit used to be translated, so every enemy
+ * bullet got the debris sprite ($C6B6 entry $60, 12 lines) and a non-zero +19
+ * timer, which sends the updater down its home-in-on-the-player branch.  The
+ * shots drifted at the ship as tall figures -- "floating gold men" -- instead
+ * of flying out as small round dots.  An aimed shot must be height 7, graphics
+ * $58, timer 0 and carry a real velocity. */
+static int aimed_enemy_shot_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0, aimed = 0, debris_shaped = 0;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+    for (long frame = 0; frame < 400; frame++) {
+        bs_recomp_set_input(fixture, 0, BS_INPUT_FIRE);
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xbce) break;
+        }
+        for (unsigned slot = 0; slot < 16; slot++) {
+            uint32_t effect = 0x4976 + slot * 20;
+            if (bs_recomp_read16(fixture, effect) == 0) continue;
+            uint8_t height = bs_recomp_read8(fixture, effect + 16);
+            uint8_t graphic = bs_recomp_read8(fixture, effect + 17);
+            uint32_t vx = bs_recomp_read32(fixture, effect + 8);
+            uint32_t vy = bs_recomp_read32(fixture, effect + 12);
+            if (height == 7 && graphic == 0x58 && (vx || vy)) aimed++;
+            if (height == 12 && graphic == 0x60) debris_shaped++;
+        }
+    }
+    /* The opening waves shoot; if nothing aimed ever appears the aimed exit
+     * is unreachable again. */
+    passed = aimed > 0 && aimed > debris_shaped;
+    if (!passed)
+        fprintf(stderr, "aimed enemy shots: %d aimed, %d debris-shaped\n",
+                aimed, debris_shaped);
+done:
+    free(fixture);
+    return passed;
+}
+
+/* LAB_40BE at $34DC/$35B2 was never called, so the eight ASCII score digits
+ * ending at -18620(A5) stayed "00000000" for the whole game.  Shooting things
+ * has to move them, and the result has to stay a decimal string. */
+static int score_award_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+    for (long frame = 0; frame < 300; frame++) {
+        bs_recomp_set_input(fixture, 0, BS_INPUT_FIRE);
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xbce) break;
+        }
+    }
+    /* Player one's eight digits, $4EA6..$4EAD (the record base plus 106). */
+    int scored = 0, decimal = 1;
+    for (int column = 0; column < 8; column++) {
+        uint8_t digit = bs_recomp_read8(fixture, 0x4e3c + 106 + column);
+        if (digit < '0' || digit > '9') decimal = 0;
+        if (digit != '0') scored = 1;
+    }
+    passed = scored && decimal;
+    if (!passed) {
+        fprintf(stderr, "score: \"");
+        for (int column = 0; column < 8; column++)
+            fputc(bs_recomp_read8(fixture, 0x4e3c + 106 + column), stderr);
+        fprintf(stderr, "\" (scored=%d decimal=%d)\n", scored, decimal);
+    }
+done:
+    free(fixture);
+    return passed;
+}
+
+/* $24F34/$24856: the music sequencer.  Audio bring-up armed the CIA-B timer
+ * and pointed $000008 at $24F34, but the dispatcher never runs guest interrupt
+ * code, so nothing restarted a channel and Paula stayed silent.  Driven from
+ * the frame loop it has to keep all four channels supplied with periods and
+ * volumes and leave the driver out of its idle state. */
+static unsigned music_period_writes[4], music_volume_writes[4];
+static unsigned music_dmacon_writes;
+
+static void count_music_write(void *user, uint16_t reg, uint16_t value)
+{
+    (void)user; (void)value;
+    if (reg == 0x096) music_dmacon_writes++;
+    for (int channel = 0; channel < 4; channel++) {
+        if (reg == 0x0a6 + channel * 16) music_period_writes[channel]++;
+        if (reg == 0x0a8 + channel * 16) music_volume_writes[channel]++;
+    }
+}
+
+static int music_sequencer_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0;
+    music_dmacon_writes = 0;
+    for (int channel = 0; channel < 4; channel++)
+        music_period_writes[channel] = music_volume_writes[channel] = 0;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+    bs_recomp_set_music_enabled(fixture, 1);
+    bs_recomp_set_custom_write_hook(fixture, count_music_write, NULL);
+    for (long frame = 0; frame < 200; frame++) {
+        bs_recomp_set_input(fixture, 0, BS_INPUT_FIRE);
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xbce) break;
+        }
+    }
+    passed = music_dmacon_writes > 100 &&
+             bs_recomp_read8(fixture, 0x251f8) == 0;
+    for (int channel = 0; channel < 4; channel++)
+        if (!music_period_writes[channel] || !music_volume_writes[channel])
+            passed = 0;
+    if (!passed) {
+        fprintf(stderr, "music: dmacon=%u idle=%u periods",
+                music_dmacon_writes, bs_recomp_read8(fixture, 0x251f8));
+        for (int channel = 0; channel < 4; channel++)
+            fprintf(stderr, " %u/%u", music_period_writes[channel],
+                    music_volume_writes[channel]);
+        fprintf(stderr, "\n");
+    }
+done:
+    free(fixture);
+    return passed;
+}
+
+/* LAB_410A used to be an eleven-line stub, so the recompilation played level
+ * one forever: 120,000 game frames without the mode ever changing.  Losing
+ * every life has to run the initials entry ($4232), which parks the ship at
+ * $3E7 and arms the $FA hold at -16122(A5); LAB_410A then counts that down and
+ * stages the next screen by setting 8514 and 8524. */
+static int end_of_game_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0, entry_done = 0, staged = 0;
+    long entry_frame = -1, staged_frame = -1;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+    for (long frame = 0; frame < 2000 && !staged; frame++) {
+        /* Hold fire while there are lives left, then let go: $436C restarts
+         * the ship the moment fire is seen at the game-over screen, which is
+         * the arcade "press fire to play again" path.  Releasing it lets the
+         * $FA hold expire so the screen change can be observed instead. */
+        bs_recomp_set_input(fixture, 0,
+            bs_recomp_read8(fixture, 0x4e3c + 56) ? BS_INPUT_FIRE : 0);
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) goto done;
+            if (fixture->cpu.pc == 0xbce) break;
+        }
+        if (!entry_done && bs_recomp_read8(fixture, 0x4e3c + 91) == 0xff) {
+            entry_done = 1;
+            entry_frame = frame;
+        }
+        if (bs_recomp_read16(fixture, 0x8000 + 8514) != 0) {
+            staged = 1;
+            staged_frame = frame;
+        }
+    }
+    passed = entry_done && staged &&
+             bs_recomp_read16(fixture, 0x8000 + 8524) == 0xffff &&
+             bs_recomp_read16(fixture, 0x4e3c + 68) == 0x03e6;
+
+    /* The other exit: with fire held, $437A resets the ship through $127E for
+     * another game rather than changing screen. */
+    if (passed) {
+        BsRecomp *again = calloc(1, sizeof *again);
+        int restarted = 0;
+        if (again && bs_recomp_init(again,
+                "original/whdload/BattleSquadron/data") == BS_RECOMP_OK) {
+            int ok = 1;
+            for (unsigned e = 0; e < 4 && ok; e++)
+                ok = bs_recomp_run(again, edges[e].steps) == BS_RECOMP_OK &&
+                     again->cpu.pc == edges[e].pc;
+            if (ok) ok = bs_recomp_start_new_game(again) == BS_RECOMP_OK;
+            if (ok) bs_recomp_enable_live_input(again, 1);
+            for (long frame = 0; ok && frame < 1200 && !restarted; frame++) {
+                bs_recomp_set_input(again, 0, BS_INPUT_FIRE);
+                for (int g = 0; g < 512; g++) {
+                    if (bs_recomp_run(again, 1) != BS_RECOMP_OK) { ok = 0; break; }
+                    if (again->cpu.pc == 0xaa0) break;
+                }
+                for (int g = 0; ok && g < 512; g++) {
+                    if (bs_recomp_run(again, 1) != BS_RECOMP_OK) { ok = 0; break; }
+                    if (again->cpu.pc == 0xbce) break;
+                }
+                if (ok && bs_recomp_read8(again, 0x4e3c + 91) == 0 &&
+                    bs_recomp_read8(again, 0x4e3c + 38) == 0x96 &&
+                    bs_recomp_read8(again, 0x4e3c + 56) > 0 && frame > 810)
+                    restarted = 1;
+            }
+        }
+        free(again);
+        if (!restarted) {
+            fprintf(stderr, "end of game: fire at the game-over screen did "
+                    "not restart the ship\n");
+            passed = 0;
+        }
+    }
+    if (!passed)
+        fprintf(stderr, "end of game: entry=%ld staged=%ld 8524=$%04X "
+                "p1+68=$%04X\n", entry_frame, staged_frame,
+                bs_recomp_read16(fixture, 0x8000 + 8524),
+                bs_recomp_read16(fixture, 0x4e3c + 68));
+done:
+    free(fixture);
+    return passed;
+}
+
+/* The stage never used to change: 7230(A5) held the pending stage but nothing
+ * applied it, so the recompilation replayed stage zero for ever.  LAB_7002
+ * now runs the clear sequence and $7180 copies 7230 into 7228.  Reaching it
+ * needs a ship parked in the type-$27 gate's 32-pixel box for ten frames, so
+ * this steers towards the gate rather than holding fire and hoping. */
+static int stage_advance_test(void)
+{
+    BsRecomp *fixture = calloc(1, sizeof *fixture);
+    if (!fixture) return 0;
+    int passed = 0;
+    unsigned reached = 0;
+    if (bs_recomp_init(fixture,
+            "original/whdload/BattleSquadron/data") != BS_RECOMP_OK)
+        goto done;
+    static const struct { long steps; uint32_t pc; } edges[] = {
+        {38, 0x4ec}, {46, 0x5f6}, {16, 0x6fa}, {40, 0x7d0}};
+    for (unsigned e = 0; e < 4; e++)
+        if (bs_recomp_run(fixture, edges[e].steps) != BS_RECOMP_OK ||
+            fixture->cpu.pc != edges[e].pc)
+            goto done;
+    if (bs_recomp_start_new_game(fixture) != BS_RECOMP_OK) goto done;
+    bs_recomp_enable_live_input(fixture, 1);
+    for (long frame = 0; frame < 5000; frame++) {
+        int gate_x = -1, gate_y = -1;
+        for (unsigned slot = 0; slot < 18; slot++) {
+            uint32_t object = 0x2e040 + slot * 0x40;
+            if (bs_recomp_read16(fixture, object) == 0) continue;
+            if (bs_recomp_read8(fixture, object + 17) == 0x27) {
+                gate_x = bs_recomp_read16(fixture, object);
+                gate_y = bs_recomp_read16(fixture, object + 2);
+                break;
+            }
+        }
+        unsigned input = BS_INPUT_FIRE;
+        if (gate_x >= 0) {
+            int px = bs_recomp_read16(fixture, 0x4e3c + 4);
+            int py = bs_recomp_read16(fixture, 0x4e3c + 6);
+            if (px < gate_x - 2) input |= BS_INPUT_RIGHT;
+            else if (px > gate_x + 2) input |= BS_INPUT_LEFT;
+            if (py < gate_y - 2) input |= BS_INPUT_DOWN;
+            else if (py > gate_y + 2) input |= BS_INPUT_UP;
+        }
+        bs_recomp_set_input(fixture, 0, input);
+        int running = 1;
+        for (int g = 0; g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) { running = 0; break; }
+            if (fixture->cpu.pc == 0xaa0) break;
+        }
+        for (int g = 0; running && g < 512; g++) {
+            if (bs_recomp_run(fixture, 1) != BS_RECOMP_OK) { running = 0; break; }
+            if (fixture->cpu.pc == 0xbce) break;
+        }
+        unsigned stage = bs_recomp_read16(fixture, 0x8000 + 7228);
+        if (stage > reached) reached = stage;
+        if (!running) break;
+    }
+    /* Stage one is enough to prove the transition; its own object behaviour
+     * is a separate translation still outstanding. */
+    passed = reached >= 1;
+    if (!passed)
+        fprintf(stderr, "stage advance: never left stage %u\n", reached);
+done:
+    free(fixture);
+    return passed;
+}
+
 int main(void)
 {
     BsRecomp *machine = malloc(sizeof *machine);
@@ -317,6 +762,20 @@ int main(void)
           "object death animation/completion failed");
     CHECK(live_input_test(),
           "live two-player input mapping/continuation failed");
+    CHECK(primary_fire_cadence_test(),
+          "primary fire did not repeat every sixteenth game frame");
+    CHECK(gameplay_sfx_test(),
+          "gameplay produced no usable sound-effect samples");
+    CHECK(aimed_enemy_shot_test(),
+          "enemy shots spawned as stationary debris (the gold men)");
+    CHECK(score_award_test(),
+          "shooting things awarded no score");
+    CHECK(music_sequencer_test(),
+          "the music sequencer produced no Paula activity");
+    CHECK(end_of_game_test(),
+          "losing every life never ended the game");
+    CHECK(stage_advance_test(),
+          "clearing the stage never advanced the level");
     bs_recomp_set_audio_sample_hook(machine, capture_audio_sample, NULL);
     int result = bs_recomp_run(machine, 38);
     CHECK(result == BS_RECOMP_OK,

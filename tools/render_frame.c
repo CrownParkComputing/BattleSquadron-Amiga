@@ -84,7 +84,7 @@ int main(int argc, char **argv){
                         bs_recomp_read8(m,r+31),bs_recomp_read8(m,r+29),
                         bs_recomp_read8(m,r+63),bs_recomp_read16(m,r+50),
                         bs_recomp_read16(m,r+52),bs_recomp_read32(m,r+36)); }
-                for(int k=0;k<18;k++){ unsigned o=0x2e040+k*0x50;
+                for(int k=0;k<18;k++){ unsigned o=0x2e040+k*0x40;
                     if(!bs_recomp_read16(m,o)) continue;
                     printf("  obj %2d screen %4d,%4d type=$%02X state25=%u\n",
                         k,(int)bs_recomp_read16(m,o)-(int)sc,

@@ -1,4 +1,5 @@
 #include "amiga.h"
+#include "pad.h"
 #include "raylib.h"
 
 #include <stdio.h>
@@ -20,12 +21,6 @@ enum {
     RAW_F1 = 0x50
 };
 
-static void map_raw_key(int key, uint8_t raw)
-{
-    if (IsKeyPressed(key)) amiga_key_event(raw, false);
-    if (IsKeyReleased(key)) amiga_key_event(raw, true);
-}
-
 static void audio_callback(void *buffer, unsigned int frames)
 {
     amiga_audio_pull((int16_t *)buffer, (int)frames);
@@ -45,82 +40,30 @@ static void request_pal_frame_rate(void)
 }
 #endif
 
-static uint8_t keyboard_stick(bool arrows)
-{
-    uint8_t state = 0;
-    if (IsKeyDown(arrows ? KEY_UP : KEY_W)) state |= 0x01;
-    if (IsKeyDown(arrows ? KEY_DOWN : KEY_S)) state |= 0x02;
-    if (IsKeyDown(arrows ? KEY_LEFT : KEY_A)) state |= 0x04;
-    if (IsKeyDown(arrows ? KEY_RIGHT : KEY_D)) state |= 0x08;
-    if (arrows) {
-        if (IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_LEFT_CONTROL) ||
-            IsKeyDown(KEY_ENTER)) state |= 0x10;
-        if (IsKeyDown(KEY_X) || IsKeyDown(KEY_LEFT_SHIFT)) state |= 0x20;
-    } else {
-        if (IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_C)) state |= 0x10;
-        if (IsKeyDown(KEY_V) || IsKeyDown(KEY_TAB)) state |= 0x20;
-    }
-    return state;
-}
 
-static uint8_t gamepad_stick(int pad)
+/* The title screen defaults to TWO PLAYERS, so fire on player one alone still
+ * started a two-player game.  The loader forces player one on at $10AA and
+ * copies the title's selection byte at 10965(A5) = $AAD5 into player two's
+ * enable flag at $10B0, so holding that byte clear makes fire a ONE-player
+ * start.  It is released as soon as player two presses their own fire, which
+ * is how they join.  Verified: player two then parks off-screen at $3E7
+ * instead of joining at 496,512. */
+static void select_player_count(uint8_t player_two_controls)
 {
-    if (!IsGamepadAvailable(pad)) return 0;
-    uint8_t state = 0;
-    float x = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_X);
-    float y = GetGamepadAxisMovement(pad, GAMEPAD_AXIS_LEFT_Y);
-    if (IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_UP) || y < -0.35f)
-        state |= 0x01;
-    if (IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_DOWN) || y > 0.35f)
-        state |= 0x02;
-    if (IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_LEFT) || x < -0.35f)
-        state |= 0x04;
-    if (IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_FACE_RIGHT) || x > 0.35f)
-        state |= 0x08;
-    if (IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) ||
-        IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_LEFT) ||
-        IsGamepadButtonDown(pad, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
-        IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_2))
-        state |= 0x10;
-    if (IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ||
-        IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_FACE_UP) ||
-        IsGamepadButtonDown(pad, GAMEPAD_BUTTON_LEFT_TRIGGER_1) ||
-        IsGamepadButtonDown(pad, GAMEPAD_BUTTON_RIGHT_TRIGGER_1))
-        state |= 0x20;
-    static uint8_t previous[4];
-    if (pad < 4 && state != previous[pad]) {
-#ifdef PLATFORM_ANDROID
-        TraceLog(LOG_WARNING, "ANDROID: controller %d state=$%02x axes=(%.2f,%.2f)",
-                 pad, state, x, y);
-#else
-        fprintf(stderr, "controller %d state=$%02x axes=(%.2f,%.2f)\n",
-                pad, state, x, y);
-#endif
-        previous[pad] = state;
-    }
-    return state;
+    static bool player_two_joined;
+    if (player_two_controls & 0x10) player_two_joined = true;
+    if (!player_two_joined) chip[0xaad5] = 0;
 }
 
 static void update_input(void)
 {
     joy_state[1] = keyboard_stick(true) | gamepad_stick(0);
     joy_state[0] = keyboard_stick(false) | gamepad_stick(1);
+    select_player_count(joy_state[0]);
     map_raw_key(KEY_SPACE, RAW_SPACE);
     map_raw_key(KEY_ENTER, RAW_RETURN);
     for (int number = 0; number < 10; number++)
         map_raw_key(KEY_F1 + number, (uint8_t)(RAW_F1 + number));
-}
-
-static Rectangle fit_screen(void)
-{
-    float scale_x = GetScreenWidth() / (float)SCREEN_W;
-    float scale_y = GetScreenHeight() / (float)SCREEN_H;
-    float scale = scale_x < scale_y ? scale_x : scale_y;
-    float width = SCREEN_W * scale;
-    float height = SCREEN_H * scale;
-    return (Rectangle){(GetScreenWidth() - width) * 0.5f,
-                       (GetScreenHeight() - height) * 0.5f,
-                       width, height};
 }
 
 static void draw_splash(Texture2D logo)
@@ -233,7 +176,34 @@ int main(int argc, char **argv)
     long rendered_frames = 0;
 #endif
 
+    bool paused = false;
     while (!WindowShouldClose() && !amiga_stopped()) {
+        /* P pauses the emulation: the frame keeps being presented so the
+         * picture stays up, but no Amiga frame is run and no input reaches the
+         * game, which also stops the ship drifting while paused. */
+        js_poll();
+        static bool back_was_down;
+        /* START pauses (BACK too, for pads that put it somewhere odd). */
+        bool back_down = js_present(0)
+            ? (js_button_down(0, 7) || js_button_down(0, 6))
+            : (IsGamepadAvailable(0) &&
+               (IsGamepadButtonDown(0, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
+                IsGamepadButtonDown(0, GAMEPAD_BUTTON_MIDDLE_LEFT)));
+        if (IsKeyPressed(KEY_P) || (back_down && !back_was_down))
+            paused = !paused;
+        back_was_down = back_down;
+        if (paused) {
+            BeginDrawing();
+            ClearBackground(BLACK);
+            Rectangle where = fit_screen();
+            DrawTexturePro(texture, (Rectangle){0, 0, SCREEN_W, SCREEN_H},
+                           where, (Vector2){0, 0}, 0, WHITE);
+            DrawText("PAUSED  -  P to resume",
+                     (int)where.x + 12, (int)where.y + 12, 20,
+                     (Color){255, 220, 90, 255});
+            EndDrawing();
+            continue;
+        }
         update_input();
 #ifdef PLATFORM_ANDROID
         double now = GetTime();

@@ -152,12 +152,29 @@ static void render_bitplane_line(OcsVideo *video, int line)
     int depth = (video->bplcon0 >> 12) & 7;
     if (depth > 6) depth = 6;
     int fetch_lead = (0x38 - (video->ddfstrt & 0xfc)) * 2;
+    /* Same correction as the Musashi host: the playfield is positioned from
+     * the DDF fetch start while sprites are positioned from DIWSTRT, so they
+     * only agree under the textbook pairing DIWSTRT_H = DDFSTRT*2 + 17.
+     * Battle Squadron sets DIWSTRT_H $90 against DDFSTRT $38, biasing the
+     * window 15 lores pixels, and its display window is 288 wide -- drawing
+     * fetched data across all 320 left content stranded on the right. */
+    int window_start = video->diwstrt & 0xff;
+    int window_stop = (int)(video->diwstop & 0xff) | 0x100;
+    int diw_bias = window_start - ((int)(video->ddfstrt & 0xfc) * 2 + 17);
+    int visible = window_stop - window_start;
+    if (visible < 0) visible = 0;
+    if (visible > OCS_VIDEO_WIDTH) visible = OCS_VIDEO_WIDTH;
     bool dual = (video->bplcon0 & 0x0400) != 0;
     bool pf2_priority = (video->bplcon2 & 0x0040) != 0;
     for (int x = 0; x < OCS_VIDEO_WIDTH; x++) {
+        if (x >= visible) {
+            output[x] = rgb4(video->color[0]);
+            continue;
+        }
         int index = 0;
         if (!dual) {
-            int source_x = x + fetch_lead - (video->bplcon1 & 15);
+            int source_x = x + fetch_lead + diw_bias -
+                           (video->bplcon1 & 15);
             for (int plane = 0; plane < depth; plane++)
                 index |= plane_bit(video, video->bplpt[plane], source_x)
                          << plane;
@@ -166,7 +183,7 @@ static void render_bitplane_line(OcsVideo *video, int line)
             for (int plane = 0; plane < depth; plane++) {
                 int scroll = (plane & 1) ? ((video->bplcon1 >> 4) & 15)
                                          : (video->bplcon1 & 15);
-                int source_x = x + fetch_lead - scroll;
+                int source_x = x + fetch_lead + diw_bias - scroll;
                 int value = plane_bit(video, video->bplpt[plane], source_x);
                 if (plane & 1) second |= value << (plane >> 1);
                 else first |= value << (plane >> 1);
@@ -222,6 +239,12 @@ static void render_sprites_line(OcsVideo *video, int line)
 {
     int y = line - ((video->diwstrt >> 8) & 0xff);
     if (y < 0 || y >= OCS_VIDEO_HEIGHT) return;
+    /* Same DIWSTOP clip as the Musashi host: sprite-drawn text otherwise
+     * piles up in the right-hand border. */
+    int sprite_visible =
+        ((int)(video->diwstop & 0xff) | 0x100) - (video->diwstrt & 0xff);
+    if (sprite_visible < 0) sprite_visible = 0;
+    if (sprite_visible > OCS_VIDEO_WIDTH) sprite_visible = OCS_VIDEO_WIDTH;
     for (int pair = 3; pair >= 0; pair--) {
         uint8_t pixels[2][OCS_VIDEO_WIDTH] = {{0}};
         SpriteLine lines[2] = {
@@ -240,7 +263,7 @@ static void render_sprites_line(OcsVideo *video, int line)
             }
         }
         int bank = 16 + pair * 4;
-        for (int x = 0; x < OCS_VIDEO_WIDTH; x++) {
+        for (int x = 0; x < sprite_visible; x++) {
             if (lines[1].attached) {
                 int index = pixels[0][x] | (pixels[1][x] << 2);
                 if (index)

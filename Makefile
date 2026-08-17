@@ -4,7 +4,7 @@ verify:
 regen:
 	./regen_asm.sh
 
-MUSASHI_DIR ?= ../SWIV/src/musashi
+MUSASHI_DIR ?= $(HOME)/BattleSquadron/src/musashi
 MUSASHI = $(MUSASHI_DIR)/m68kcpu.c $(MUSASHI_DIR)/m68kops.c \
 	$(MUSASHI_DIR)/m68kdasm.c $(MUSASHI_DIR)/softfloat/softfloat.c
 NATIVE_CFLAGS = -DM68K_INSTRUCTION_HOOK=M68K_OPT_SPECIFY_HANDLER \
@@ -14,10 +14,43 @@ RAYLIB_FLAGS = -I$(HOME)/.local/include $(HOME)/.local/lib/libraylib.a \
 	-lm -lpthread -ldl -lGL -lX11
 
 build/battle_squadron_native: src/host/main.c src/host/amiga.c \
-		src/host/amiga.h $(MUSASHI)
+		src/host/amiga.h src/host/whdload.c src/host/whdload.h $(MUSASHI)
 	mkdir -p build
 	$(CC) $(NATIVE_CFLAGS) -o $@ src/host/main.c src/host/amiga.c \
-		$(MUSASHI) -lm
+		src/host/whdload.c $(MUSASHI) -lm
+
+build/hybris_native: src/host/hybris_native.c src/host/whdload.c \
+		src/host/amiga.c src/host/amiga.h src/host/whdload.h $(MUSASHI)
+	mkdir -p build
+	$(CC) $(NATIVE_CFLAGS) -o $@ src/host/hybris_native.c \
+		src/host/whdload.c src/host/amiga.c $(MUSASHI) -lm
+
+build/hybris: src/host/hybris_run.c src/host/exeboot.c src/host/hunk.c \
+		src/host/hybris_files.c src/host/hybris_loader.c \
+		src/host/whdload.c src/host/amiga.c \
+		src/host/amiga.h src/host/exeboot.h src/host/hunk.h \
+		src/host/hybris_files.h src/host/hybris_loader.h $(MUSASHI)
+	mkdir -p build
+	$(CC) $(NATIVE_CFLAGS) -o $@ src/host/hybris_run.c src/host/exeboot.c \
+		src/host/hunk.c src/host/hybris_files.c src/host/hybris_loader.c \
+		src/host/whdload.c src/host/amiga.c $(MUSASHI) -lm
+
+# The file server on its own: the disk map, track-to-file resolution and the
+# tail clamp, with no 68000 and no disk image in the loop.
+build/test_hybris_files: tests/test_hybris_files.c src/host/hybris_files.c \
+		src/host/hybris_files.h
+	mkdir -p build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/host -o $@ \
+		tests/test_hybris_files.c src/host/hybris_files.c
+
+hybris-test: build/test_hybris_files
+	./build/test_hybris_files original/hybris
+
+hybris: build/hybris
+
+# The abandoned WHDLoad route, kept only because the slave analysis lives
+# in it; the file route above is the one that boots.
+hybris-whdload: build/hybris_native
 
 native: build/battle_squadron_native
 
@@ -174,7 +207,24 @@ build/render_frame: tools/render_frame.c src/recomp/runtime.c \
 	mkdir -p build
 	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/recomp -Isrc/platform -o $@ $^ -lm
 
+build/render_at: tools/render_at.c src/recomp/runtime.c \
+		src/recomp/overlay.c src/recomp/bond.c src/platform/ocs_video.c
+	mkdir -p build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/recomp -Isrc/platform -o $@ $^ -lm
+
+render-at: build/render_at
+
 render-frame: build/render_frame
+
+build/recomp_dump: tools/recomp_dump.c src/recomp/runtime.c \
+		src/recomp/runtime.h src/recomp/overlay.c src/recomp/overlay.h \
+		src/recomp/bond.c src/recomp/bond.h
+	mkdir -p build
+	$(CC) -O2 -std=c11 -Wall -Wextra -Isrc/recomp -o $@ \
+		tools/recomp_dump.c src/recomp/runtime.c src/recomp/overlay.c \
+		src/recomp/bond.c
+
+recomp-dump: build/recomp_dump
 
 recomp-preview: build/battle_squadron_recomp_preview
 
@@ -182,10 +232,28 @@ show-recomp: build/battle_squadron_recomp_preview
 	./build/battle_squadron_recomp_preview
 
 build/battle_squadron: src/host/frontend.c src/host/amiga.c \
-		src/host/amiga.h $(MUSASHI)
+		src/host/amiga.h src/host/whdload.c src/host/whdload.h \
+		src/host/pad.c src/host/pad.h $(MUSASHI)
 	mkdir -p build
 	$(CC) $(NATIVE_CFLAGS) -I$(HOME)/.local/include -o $@ \
-		src/host/frontend.c src/host/amiga.c $(MUSASHI) $(RAYLIB_FLAGS)
+		src/host/frontend.c src/host/pad.c src/host/amiga.c \
+		src/host/whdload.c $(MUSASHI) $(RAYLIB_FLAGS)
+
+# Hybris, playable: the same chipset and the same pad handling, booted from
+# files through the loader hook.
+build/hybris_play: src/host/hybris_play.c src/host/pad.c src/host/pad.h \
+		src/host/exeboot.c src/host/hunk.c src/host/hybris_files.c \
+		src/host/hybris_loader.c src/host/whdload.c src/host/amiga.c \
+		src/host/amiga.h src/host/exeboot.h src/host/hybris_loader.h \
+		$(MUSASHI)
+	mkdir -p build
+	$(CC) $(NATIVE_CFLAGS) -I$(HOME)/.local/include -o $@ \
+		src/host/hybris_play.c src/host/pad.c src/host/exeboot.c \
+		src/host/hunk.c src/host/hybris_files.c src/host/hybris_loader.c \
+		src/host/whdload.c src/host/amiga.c $(MUSASHI) $(RAYLIB_FLAGS)
+
+play-hybris: build/hybris_play
+	./build/hybris_play
 
 playable: build/battle_squadron
 
@@ -205,8 +273,6 @@ test: recomp-test unit-test integration-test
 native-smoke: build/battle_squadron_native
 	./build/battle_squadron_native --selftest
 	./build/battle_squadron_native --frames 50000 --expect-files 20 \
-		--expect-blits 1000000
-
-.PHONY: verify regen test unit-test integration-test native native-smoke \
-	recomp-test recomp-preview show-recomp render-frame map-test map-extract map-preview \
-	show-map playable run
+		--expect-blits 1000000	.PHONY: verify regen test unit-test integration-test native native-smoke \
+	recomp-test recomp-preview show-recomp render-frame recomp-dump map-test map-extract \
+	map-preview show-map playable run
