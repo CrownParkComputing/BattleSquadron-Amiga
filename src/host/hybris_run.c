@@ -63,6 +63,7 @@ int main(int argc, char **argv)
     long fire_from = -1, left_from = -1, video_from = -1;
     long play_from = -1, second_from = -1, space_from = -1;
     long fire_period = 0;   /* 0 = hold, N = toggle every N frames */
+    long key_at = -1; unsigned key_code = 0x44;
     const char *watch = NULL; uint32_t watch_at = 0, watch_len = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--exe") && i + 1 < argc) exe = argv[++i];
@@ -98,6 +99,10 @@ int main(int argc, char **argv)
             watch_at = (uint32_t)strtoul(argv[++i], NULL, 16);
             watch_len = (uint32_t)strtoul(argv[++i], NULL, 16);
             watch = "build/watch.bin";
+        }
+        else if (!strcmp(argv[i], "--key-at") && i + 2 < argc) {
+            key_at = atol(argv[++i]);
+            key_code = (unsigned)strtoul(argv[++i], NULL, 16);
         }
         else if (!strcmp(argv[i], "--trace")) trace = true;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc)
@@ -136,6 +141,8 @@ int main(int argc, char **argv)
         /* Tap fire so the attract screen starts a real game: the demo does
          * not necessarily draw everything a game in progress does. */
         if (video_from >= 0 && frame == video_from) amiga_enable_video(true);
+        if (key_at >= 0 && (frame == key_at || frame == key_at + 3))
+            amiga_key_event((uint8_t)key_code, frame != key_at);
         if (space_from >= 0 && frame >= space_from && frame % 25 == 0)
             amiga_key_event(0x40, frame % 50 != 0);   /* SPACE down / up */
         if (second_from >= 0 && frame >= second_from) {

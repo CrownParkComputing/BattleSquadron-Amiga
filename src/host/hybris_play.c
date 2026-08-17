@@ -28,46 +28,9 @@ enum {
     RAW_F1     = 0x50
 };
 
-/* An alternative soundtrack: Battle Squadron's music, captured from that
- * port's own Paula output and played instead of Hybris' when toggled.  It
- * shares the one output stream, so the switch is instant and there is never
- * more than one thing making noise. */
-static int16_t *track_samples;      /* interleaved stereo */
-static long track_frames;
-static long track_position;
-static volatile bool track_active;
-
-static bool load_track(const char *path)
-{
-    FILE *file = fopen(path, "rb");
-    if (!file) return false;
-    uint8_t header[44];
-    if (fread(header, 1, sizeof header, file) != sizeof header ||
-        memcmp(header, "RIFF", 4) || memcmp(header + 8, "WAVE", 4)) {
-        fclose(file); return false;
-    }
-    long bytes = (long)header[40] | ((long)header[41] << 8) |
-                 ((long)header[42] << 16) | ((long)header[43] << 24);
-    track_samples = malloc((size_t)bytes);
-    if (!track_samples) { fclose(file); return false; }
-    size_t got = fread(track_samples, 1, (size_t)bytes, file);
-    fclose(file);
-    track_frames = (long)got / 4;              /* 16-bit stereo */
-    return track_frames > 0;
-}
-
 static void audio_callback(void *buffer, unsigned int frames)
 {
-    int16_t *out = (int16_t *)buffer;
-    if (!track_active || !track_frames) {
-        amiga_audio_pull(out, (int)frames);
-        return;
-    }
-    for (unsigned int i = 0; i < frames; i++) {
-        out[i * 2] = track_samples[track_position * 2];
-        out[i * 2 + 1] = track_samples[track_position * 2 + 1];
-        if (++track_position >= track_frames) track_position = 0;
-    }
+    amiga_audio_pull((int16_t *)buffer, (int)frames);
 }
 
 /* The title screen is the one that opens the wide 336-pixel display window;
@@ -125,23 +88,30 @@ static uint8_t hybris_keyboard(void)
 static void update_input(void)
 {
     uint8_t sticks = hybris_keyboard() | gamepad_stick(0) | gamepad_stick(1);
-    /* Take the second button off the shoulder buttons: L1 toggles the
-     * soundtrack, and B alone is the second button. */
     sticks &= (uint8_t)~0x20;
-    if (pad_face(0, 1, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ||
-        pad_face(1, 1, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ||
-        IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_X))
-        sticks |= 0x20;
+    /* B is the SPECIAL: the game reads a second joystick button as a POT0DAT
+     * change, which sets the same action bit the SPACE key does. */
+    for (int pad = 0; pad < 2; pad++)
+        if (pad_face(pad, 1, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT))
+            sticks |= 0x20;
+    if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_X)) sticks |= 0x20;
     sticks = apply_autofire(sticks);
     joy_state[1] = sticks;
     /* The second button is read as a POT0DAT change, not through POTGOR or
      * the fire line, so it has to appear on port 0 as well. */
     joy_state[0] = (uint8_t)(sticks & 0x20);
 
-    /* X and Y on either pad press the two action keys. */
+    /* Name every button as it is pressed.  Which index a pad reports for a
+     * given physical button varies enough that guessing has been wrong twice;
+     * this says exactly what this pad sends. */
+    /* SELECT opens the game's own options screen (it tests SPACE).  This is
+     * deliberately NOT a face button: whichever one a pad calls A varies, so
+     * a menu key there means the thumb you fire with opens the options
+     * screen instead of shooting. */
     static bool space_was, return_was;
-    bool space_down = pad_face(0, 2, GAMEPAD_BUTTON_RIGHT_FACE_LEFT) ||
-                      pad_face(1, 2, GAMEPAD_BUTTON_RIGHT_FACE_LEFT);
+    bool space_down = pad_face(0, 6, GAMEPAD_BUTTON_MIDDLE_LEFT) ||
+                      pad_face(1, 6, GAMEPAD_BUTTON_MIDDLE_LEFT);
+    /* Y is the SPLIT: the game's other action key. */
     bool return_down = pad_face(0, 3, GAMEPAD_BUTTON_RIGHT_FACE_UP) ||
                        pad_face(1, 3, GAMEPAD_BUTTON_RIGHT_FACE_UP);
     pad_key(space_down, &space_was, RAW_SPACE);
@@ -172,12 +142,10 @@ int main(int argc, char **argv)
     const char *data = "hybris";
     const char *sprite_folder = "sprites";
     const char *logo_path = "retro-recompilation.png";
-    const char *track_path = "battle-squadron-theme.wav";
 #else
     const char *data = "original/hybris";
     const char *sprite_folder = "assets/sprites";
     const char *logo_path = "assets/retro-recompilation.png";
-    const char *track_path = "assets/battle-squadron-theme.wav";
 #endif
     const char *exe = NULL;
     for (int i = 1; i < argc; i++) {
@@ -247,9 +215,6 @@ int main(int argc, char **argv)
         if (art[i].id) SetTextureFilter(art[i], TEXTURE_FILTER_BILINEAR);
     }
 
-    if (load_track(track_path))
-        fprintf(stderr, "alternative soundtrack: %.1fs loaded (L1 toggles)\n",
-                track_frames / 44100.0);
 
     Texture2D logo = LoadTexture(logo_path);
     SetTextureFilter(logo, TEXTURE_FILTER_BILINEAR);
@@ -264,12 +229,10 @@ int main(int argc, char **argv)
     bool start_was_down = false;
     while (!WindowShouldClose() && !amiga_stopped()) {
         js_poll();
-        /* P on the keyboard, START (or BACK) on a pad. */
-        bool start_down = js_present(0)
-            ? (js_button_down(0, 7) || js_button_down(0, 6))
-            : (IsGamepadAvailable(0) &&
-               (IsGamepadButtonDown(0, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
-                IsGamepadButtonDown(0, GAMEPAD_BUTTON_MIDDLE_LEFT)));
+        /* P on the keyboard, START on a pad.  NOT select as well: select is
+         * the options key now, and one button cannot be both. */
+        bool start_down = pad_face(0, 7, GAMEPAD_BUTTON_MIDDLE_RIGHT) ||
+                          pad_face(1, 7, GAMEPAD_BUTTON_MIDDLE_RIGHT);
         if (IsKeyPressed(KEY_P) || (start_down && !start_was_down))
             paused = !paused;
         start_was_down = start_down;
@@ -287,18 +250,6 @@ int main(int argc, char **argv)
             EndDrawing();
             continue;
         }
-
-        /* L1 swaps between the game's own music and the alternative. */
-        static bool l1_was_down;
-        bool l1_down = pad_face(0, 4, GAMEPAD_BUTTON_LEFT_TRIGGER_1) ||
-                       pad_face(1, 4, GAMEPAD_BUTTON_LEFT_TRIGGER_1);
-        if ((l1_down && !l1_was_down) || IsKeyPressed(KEY_F2)) {
-            track_active = !track_active;
-            track_position = 0;
-            fprintf(stderr, "soundtrack: %s\n",
-                    track_active ? "Battle Squadron" : "Hybris");
-        }
-        l1_was_down = l1_down;
 
         /* F12 freezes everything about the current frame to disk, so a
          * glitch that only happens while playing can be diagnosed after the
@@ -334,12 +285,6 @@ int main(int argc, char **argv)
         update_input();
         amiga_run_frame();
         amiga_audio_frame();
-        if (track_active) {
-            /* Nothing is consuming Paula while the other track plays, so
-             * drain its ring rather than letting it back up. */
-            static int16_t discard_ring[882 * 2];
-            amiga_audio_pull(discard_ring, 882);
-        }
         if (!audio_started && amiga_audio_fill() >= 1764) {
             PlayAudioStream(stream);
             audio_started = true;
