@@ -238,6 +238,9 @@ static void log_blit_source(uint32_t source, int width, int height,
 typedef struct { uint32_t low, high; int id; } Replacement;
 static Replacement replacements[16];
 static int replacement_count;
+/* Identify mode: record where every claimed source lands but let the original
+ * draw anyway, so a frame can be matched against the addresses that drew it. */
+static bool replacements_suppress = true;
 BsSpriteDraw bs_sprite_draws[64];
 int bs_sprite_draw_count;
 static uint32_t frame_bpl0;          /* bitplane 0 at the top of the frame */
@@ -253,6 +256,8 @@ void amiga_register_replacement(uint32_t low, uint32_t high, int id)
 }
 
 void amiga_clear_replacements(void) { replacement_count = 0; }
+
+void amiga_replacements_suppress(bool on) { replacements_suppress = on; }
 
 /* Returns the id if this blit is a claimed one AND is the first plane of it,
  * having recorded where it would have landed; -1 otherwise. */
@@ -279,7 +284,8 @@ static int claim_blit(uint32_t source, uint32_t dest, int words, int rows)
             draw->y = row + (((int)(diwstrt >> 8) & 0xff) - display_top);
             draw->width = words * 16;
             draw->height = rows;
-            draw->id = replacements[i].id;
+            draw->id = replacements[i].id ? replacements[i].id
+                                          : (int)source;
         }
         return replacements[i].id;
     }
@@ -293,11 +299,11 @@ static void blit(uint16_t size)
     if (!height) height = 1024;
     if (!width) width = 64;
     /* A claimed source draws nothing: the frontend paints it instead. */
-    if (((bltcon0 & 0x0800) &&
-         claim_blit(bltpt[0], bltpt[3], width, height) >= 0) ||
-        ((bltcon0 & 0x0400) &&
-         claim_blit(bltpt[1], bltpt[3], width, height) >= 0))
-        return;
+    bool claimed = ((bltcon0 & 0x0800) &&
+                    claim_blit(bltpt[0], bltpt[3], width, height) >= 0) ||
+                   ((bltcon0 & 0x0400) &&
+                    claim_blit(bltpt[1], bltpt[3], width, height) >= 0);
+    if (claimed && replacements_suppress) return;
     if (bltcon0 & 0x0800)
         log_blit_source(bltpt[0], width, height, bltcon0, bltmod[0],
                         bltpt[3], bltmod[3]);

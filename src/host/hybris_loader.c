@@ -136,14 +136,18 @@ static void resign_loader(void)
     }
 }
 
-/* The armoured alien's artwork.  Its frames sit together in the loaded data,
- * five planes each (four colour, the fifth an inverted mask), every plane
- * padded to 128 bytes.  Claiming the range means the blitter draws none of
- * it and the frontend paints a replacement at the same screen rectangle --
- * at whatever colour depth and resolution it likes, because that is no
- * longer the chipset's business. */
-#define ALIEN_ART_LOW   0x018000
-#define ALIEN_ART_HIGH  0x018600
+/* A FLYING enemy, as opposed to the animated map furniture sitting right
+ * next to it in memory.  The three animation frames are 640 bytes apart --
+ * five planes of 128 -- and they are identifiable because they move
+ * SIDEWAYS: a map element only ever scrolls straight down with the terrain,
+ * so tracking each blit source's screen position over time separates the two
+ * without having to understand either one's artwork.
+ *   $018120, $0183a0, $018620 = frames 1..3
+ * Claiming from the first frame's base to the end of the third covers every
+ * plane of all three, and deliberately starts ABOVE $0180c0, which is the
+ * animated opening in the map. */
+#define ALIEN_ART_LOW   0x018120
+#define ALIEN_ART_HIGH  0x0188a0
 #define ALIEN_ID        0
 
 bool hybris_loader_install(const char *directory)
@@ -151,6 +155,12 @@ bool hybris_loader_install(const char *directory)
     if (!hybris_files_load(directory)) return false;
     if (getenv("HYBRIS_REMASTER"))
         amiga_register_replacement(ALIEN_ART_LOW, ALIEN_ART_HIGH, ALIEN_ID);
+    if (getenv("HYBRIS_IDENTIFY")) {
+        /* Claim everything, suppress nothing: every object reports the
+         * address that drew it, against a picture that still looks normal. */
+        amiga_register_replacement(0x014000, 0x040000, 0);
+        amiga_replacements_suppress(false);
+    }
     resign_loader();
     trace = getenv("HYBRIS_TRACE_LOAD") != NULL;
     amiga_set_pc_hook(hybris_hook);

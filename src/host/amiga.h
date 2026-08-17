@@ -71,6 +71,7 @@ extern int bs_sprite_draw_count;
 void amiga_register_replacement(uint32_t source_low, uint32_t source_high,
                                 int id);
 void amiga_clear_replacements(void);
+void amiga_replacements_suppress(bool on);
 void amiga_return_from_hook(void);
 
 void amiga_init(const char *data_dir);
