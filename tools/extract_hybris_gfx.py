@@ -7,10 +7,10 @@ distinct (source, width, height) the blitter fetched, which is exactly the
 address and size of every piece of art the game drew.  This turns each of
 those into a PNG, using the palette captured alongside the memory dump.
 
-Amiga bitplanes can be stored either as one plane after another (sequential)
-or a row of every plane at a time (interleaved), and a BOB may be blitted a
-plane at a time.  Rather than guess, this writes BOTH readings and a contact
-sheet, so the right one is obvious at a glance.
+Hybris' own format, found by reading the blit DESTINATIONS rather than
+guessing: 5 planes, each plane PADDED to 128 bytes regardless of the frame's
+real size, rows 4 bytes apart.  Decoding at the frame size instead of 128
+gives convincing noise, which is what made this take a while.
 
     BS_DUMP_BLITS=build/blits.txt ./build/hybris --frames 3000 \\
         --fire-from 700 --dump build/mem_gfx.bin
@@ -41,7 +41,8 @@ def load_palette(path):
     return palette
 
 
-def planar_pixels(memory, base, words, rows, planes, interleaved, stride=None):
+def planar_pixels(memory, base, words, rows, planes, interleaved, stride=None,
+                  plane_stride=None):
     """Decode a planar block into a list of palette indices per row.
 
     `stride` is the bytes between rows: a frame cut out of a sprite SHEET is
@@ -50,7 +51,8 @@ def planar_pixels(memory, base, words, rows, planes, interleaved, stride=None):
     out = []
     if stride is None:
         stride = words * 2
-    plane_stride = stride * rows             # sequential layout
+    if plane_stride is None:
+        plane_stride = stride * rows         # sequential, planes packed
     for y in range(rows):
         line = []
         for x in range(words * 16):
@@ -102,7 +104,15 @@ def main():
     parser.add_argument("out")
     parser.add_argument("--shape", default="2x24",
                         help="blit shape to rip, WORDSxROWS (default 2x24)")
-    parser.add_argument("--planes", type=int, default=4)
+    parser.add_argument("--planes", type=int, default=5)
+    parser.add_argument("--plane-stride", type=int, default=128,
+                        help="bytes between planes.  NOT the frame size: "
+                             "Hybris pads each 32-wide plane to 128 bytes, "
+                             "which is why decoding at the frame size gives "
+                             "noise.  The real value comes from the blit "
+                             "DESTINATIONS: consecutive plane blits land "
+                             "$4000 apart (one 256x512 bitplane) from sources "
+                             "128 apart.")
     parser.add_argument("--limit", type=int, default=120)
     args = parser.parse_args()
 
@@ -134,7 +144,8 @@ def main():
                 continue
             pixels = planar_pixels(memory, source, want_words, rows,
                                    args.planes, interleaved,
-                                   want_words * 2 + modulo)
+                                   want_words * 2 + modulo,
+                                   args.plane_stride)
             if not any(any(row) for row in pixels):
                 continue                      # nothing but background
             kind = "interleaved" if interleaved else "sequential"

@@ -209,7 +209,8 @@ static uint16_t minterm(uint8_t function, uint16_t a, uint16_t b, uint16_t c)
  * height of every piece of art the game actually puts on screen -- far more
  * reliable than guessing at the layout of a packed data file. */
 static void log_blit_source(uint32_t source, int width, int height,
-                            uint16_t con0, int modulo)
+                            uint16_t con0, int modulo, uint32_t dest,
+                            int dest_mod)
 {
     static FILE *log;
     static struct { uint32_t source; int width, height; } seen[4096];
@@ -224,8 +225,8 @@ static void log_blit_source(uint32_t source, int width, int height,
     seen[count].source = source; seen[count].width = width;
     seen[count].height = height; count++;
     if (!log) { log = fopen(path, "w"); if (!log) return; }
-    fprintf(log, "%06x %d %d %04x %d\n", source, width, height, con0,
-            modulo);
+    fprintf(log, "%06x %d %d %04x %d %06x %d %ld %06x\n", source, width,
+            height, con0, modulo, dest, dest_mod, bs_frame_no, bplpt[0]);
     fflush(log);
 }
 
@@ -236,9 +237,11 @@ static void blit(uint16_t size)
     if (!height) height = 1024;
     if (!width) width = 64;
     if (bltcon0 & 0x0800)
-        log_blit_source(bltpt[0], width, height, bltcon0, bltmod[0]);
+        log_blit_source(bltpt[0], width, height, bltcon0, bltmod[0],
+                        bltpt[3], bltmod[3]);
     if (bltcon0 & 0x0400)
-        log_blit_source(bltpt[1], width, height, bltcon0, bltmod[1]);
+        log_blit_source(bltpt[1], width, height, bltcon0, bltmod[1],
+                        bltpt[3], bltmod[3]);
     int ashift = (bltcon0 >> 12) & 15;
     int bshift = (bltcon1 >> 12) & 15;
     bool usea = bltcon0 & 0x0800;
