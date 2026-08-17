@@ -166,7 +166,19 @@ static void draw_message(const char *text)
 
 int main(int argc, char **argv)
 {
+#ifdef PLATFORM_ANDROID
+    /* Assets are unpacked at the APK root, so the paths lose their leading
+     * directory: original/ and assets/ are the two asset source folders. */
+    const char *data = "hybris";
+    const char *sprite_folder = "sprites";
+    const char *logo_path = "retro-recompilation.png";
+    const char *track_path = "battle-squadron-theme.wav";
+#else
     const char *data = "original/hybris";
+    const char *sprite_folder = "assets/sprites";
+    const char *logo_path = "assets/retro-recompilation.png";
+    const char *track_path = "assets/battle-squadron-theme.wav";
+#endif
     const char *exe = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--data") && i + 1 < argc) data = argv[++i];
@@ -193,6 +205,7 @@ int main(int argc, char **argv)
 
     ExeBoot boot;
     if (!exeboot(exe, &boot)) { CloseWindow(); return 1; }
+    hybris_set_sprite_folder(sprite_folder);
     if (!hybris_loader_install(data)) { CloseWindow(); return 1; }
     fprintf(stderr, "hybris: %d hunk(s), entry $%06x, ends $%06x\n",
             boot.hunks, boot.entry, boot.end);
@@ -234,11 +247,11 @@ int main(int argc, char **argv)
         if (art[i].id) SetTextureFilter(art[i], TEXTURE_FILTER_BILINEAR);
     }
 
-    if (load_track("assets/battle-squadron-theme.wav"))
+    if (load_track(track_path))
         fprintf(stderr, "alternative soundtrack: %.1fs loaded (L1 toggles)\n",
                 track_frames / 44100.0);
 
-    Texture2D logo = LoadTexture("assets/retro-recompilation.png");
+    Texture2D logo = LoadTexture(logo_path);
     SetTextureFilter(logo, TEXTURE_FILTER_BILINEAR);
 
     InitAudioDevice();

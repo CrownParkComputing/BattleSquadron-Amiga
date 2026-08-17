@@ -159,6 +159,13 @@ int hybris_sprite_art_count;
 #define FRAME_BYTES 640
 #define DEFAULT_FRAMES 3
 
+static char sprite_folder[256] = "assets/sprites";
+
+void hybris_set_sprite_folder(const char *folder)
+{
+    snprintf(sprite_folder, sizeof sprite_folder, "%s", folder);
+}
+
 static void load_sprite_folder(const char *folder)
 {
     DIR *dir = opendir(folder);
@@ -188,8 +195,7 @@ bool hybris_loader_install(const char *directory)
 {
     if (!hybris_files_load(directory)) return false;
     if (getenv("HYBRIS_REMASTER"))
-        load_sprite_folder(getenv("HYBRIS_SPRITES") ? getenv("HYBRIS_SPRITES")
-                                                    : "assets/sprites");
+        load_sprite_folder(sprite_folder);
     if (getenv("HYBRIS_IDENTIFY")) {
         /* Claim everything, suppress nothing: every object reports the
          * address that drew it, against a picture that still looks normal. */

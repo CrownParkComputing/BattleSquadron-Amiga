@@ -8,6 +8,10 @@
  * involved at runtime. */
 bool hybris_loader_install(const char *directory);
 
+/* Where remastered art lives.  Android unpacks assets at the APK root, so the
+ * path differs by platform. */
+void hybris_set_sprite_folder(const char *folder);
+
 extern long hybris_load_count;
 extern long hybris_load_bytes;
 extern long hybris_action_key;
